@@ -7,7 +7,13 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.ronakto.whoomp",
+      "infoPlist": {
+        "UIBackgroundModes": ["bluetooth-central"],
+        "NSBluetoothAlwaysUsageDescription": "whoomp uses Bluetooth to connect to your WHOOP strap and read biometric data.",
+        "NSBluetoothPeripheralUsageDescription": "whoomp uses Bluetooth to connect to your WHOOP strap and read biometric data."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -20,6 +26,17 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": true,
+          "modes": ["central"],
+          "bluetoothAlwaysPermission": "Allow whoomp to connect to your WHOOP strap over Bluetooth."
+        }
+      ],
+      "expo-dev-client"
+    ]
   }
 }
