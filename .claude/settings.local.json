@@ -5,7 +5,10 @@
       "Bash(git commit -m ' *)",
       "Bash(git remote *)",
       "Bash(git push *)",
-      "Bash(git pull *)"
+      "Bash(git pull *)",
+      "Bash(gh repo *)",
+      "Bash(gh search *)",
+      "Bash(gh api *)"
     ]
   }
 }
