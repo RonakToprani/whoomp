@@ -2,7 +2,7 @@ import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { View, Text } from 'react-native';
+import { Text } from 'react-native';
 import { BleProvider } from './src/ble/BleContext';
 import { useBleContext } from './src/ble/BleContext';
 import ScanScreen from './src/screens/ScanScreen';
@@ -15,11 +15,14 @@ import SettingsScreen from './src/screens/SettingsScreen';
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
 
-function TabIcon({ label, focused }: { label: string; focused: boolean }) {
+function TabIcon({ emoji, label, focused }: { emoji: string; label: string; focused: boolean }) {
   return (
-    <Text style={{ fontSize: 11, color: focused ? '#fff' : '#555', letterSpacing: 0.5, marginTop: 2 }}>
-      {label}
-    </Text>
+    <>
+      <Text style={{ fontSize: 20, lineHeight: 24 }}>{emoji}</Text>
+      <Text style={{ fontSize: 10, color: focused ? '#fff' : '#555', marginTop: 2, letterSpacing: 0.3 }}>
+        {label}
+      </Text>
+    </>
   );
 }
 
@@ -28,36 +31,34 @@ function MainTabs() {
     <Tab.Navigator
       screenOptions={{
         headerShown: false,
-        tabBarStyle: { backgroundColor: '#0a0a0a', borderTopColor: '#1a1a1a' },
-        tabBarActiveTintColor: '#fff',
-        tabBarInactiveTintColor: '#444',
+        tabBarStyle: { backgroundColor: '#0a0a0a', borderTopColor: '#1a1a1a', paddingBottom: 6, height: 64 },
         tabBarShowLabel: false,
       }}
     >
       <Tab.Screen
         name="Home"
         component={HomeScreen}
-        options={{ tabBarIcon: ({ focused }) => <TabIcon label="HOME" focused={focused} /> }}
+        options={{ tabBarIcon: ({ focused }) => <TabIcon emoji="🏠" label="Home" focused={focused} /> }}
       />
       <Tab.Screen
         name="Live"
         component={LiveScreen}
-        options={{ tabBarIcon: ({ focused }) => <TabIcon label="LIVE" focused={focused} /> }}
+        options={{ tabBarIcon: ({ focused }) => <TabIcon emoji="❤️" label="Live" focused={focused} /> }}
       />
       <Tab.Screen
         name="Trends"
         component={TrendsScreen}
-        options={{ tabBarIcon: ({ focused }) => <TabIcon label="TRENDS" focused={focused} /> }}
+        options={{ tabBarIcon: ({ focused }) => <TabIcon emoji="📈" label="Trends" focused={focused} /> }}
       />
       <Tab.Screen
         name="Sleep"
         component={SleepScreen}
-        options={{ tabBarIcon: ({ focused }) => <TabIcon label="SLEEP" focused={focused} /> }}
+        options={{ tabBarIcon: ({ focused }) => <TabIcon emoji="🌙" label="Sleep" focused={focused} /> }}
       />
       <Tab.Screen
         name="Settings"
         component={SettingsScreen}
-        options={{ tabBarIcon: ({ focused }) => <TabIcon label="SETTINGS" focused={focused} /> }}
+        options={{ tabBarIcon: ({ focused }) => <TabIcon emoji="⚙️" label="Settings" focused={focused} /> }}
       />
     </Tab.Navigator>
   );

@@ -1,25 +1,32 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { View, Text, ScrollView, StyleSheet, useWindowDimensions, AppState, RefreshControl } from 'react-native';
+import { Pedometer } from 'expo-sensors';
 import RecoveryRing from '../components/RecoveryRing';
 import MetricCard from '../components/MetricCard';
 import HRChart from '../components/HRChart';
 import { useBleContext } from '../ble/BleContext';
 import { getDailyHistory, DailyRow } from '../storage/db';
 
-function hrvQuality(ms: number): { label: string; color: string } {
-  if (ms >= 80) return { label: 'Excellent', color: '#4ade80' };
-  if (ms >= 60) return { label: 'Above avg', color: '#86efac' };
-  if (ms >= 40) return { label: 'Average', color: '#fbbf24' };
-  if (ms >= 20) return { label: 'Below avg', color: '#f97316' };
-  return { label: 'Low', color: '#f87171' };
-}
-
 export default function HomeScreen() {
   const { heartRate, hrv, rr, state, calories } = useBleContext();
   const [today, setToday] = useState<DailyRow | null>(null);
   const [yesterday, setYesterday] = useState<DailyRow | null>(null);
+  const [steps, setSteps] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const { width } = useWindowDimensions();
+
+  // Pedometer: watch live step count for today
+  useEffect(() => {
+    let sub: { remove: () => void } | null = null;
+    Pedometer.isAvailableAsync().then(ok => {
+      if (!ok) return;
+      const start = new Date();
+      start.setHours(0, 0, 0, 0);
+      Pedometer.getStepCountAsync(start, new Date()).then(r => setSteps(r.steps)).catch(() => {});
+      sub = Pedometer.watchStepCount(r => setSteps(r.steps));
+    }).catch(() => {});
+    return () => { sub?.remove(); };
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -57,8 +64,6 @@ export default function HomeScreen() {
   );
   const chartWidth = width - 48;
 
-  const qual = displayHrv != null && recovery == null ? hrvQuality(displayHrv) : null;
-
   return (
     <ScrollView
       style={styles.scroll}
@@ -69,11 +74,6 @@ export default function HomeScreen() {
         <Text style={styles.title}>{isMorningView ? 'Yesterday' : 'Today'}</Text>
         {isMorningView && (
           <Text style={styles.morningBadge}>morning view</Text>
-        )}
-        {qual && (
-          <View style={[styles.qualBadge, { borderColor: qual.color }]}>
-            <Text style={[styles.qualText, { color: qual.color }]}>{qual.label}</Text>
-          </View>
         )}
       </View>
 
@@ -91,9 +91,16 @@ export default function HomeScreen() {
         <MetricCard label="STRAIN" value={strain != null ? (Math.round(strain * 10) / 10) : null} unit="/ 21" />
       </View>
 
-      {calories > 0 && (
+      {(calories > 0 || steps != null) && (
         <View style={styles.row}>
-          <MetricCard label="CALORIES" value={Math.round(calories)} unit="kcal" />
+          <View style={styles.miniCard}>
+            <Text style={styles.miniValue}>{calories > 0 ? Math.round(calories) : '--'}</Text>
+            <Text style={styles.miniLabel}>KCAL</Text>
+          </View>
+          <View style={styles.miniCard}>
+            <Text style={styles.miniValue}>{steps != null ? steps.toLocaleString() : '--'}</Text>
+            <Text style={styles.miniLabel}>STEPS</Text>
+          </View>
         </View>
       )}
 
@@ -114,20 +121,22 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   scroll: { flex: 1, backgroundColor: '#000' },
   content: { padding: 16, paddingBottom: 40 },
-  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 24, flexWrap: 'wrap' },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 24 },
   title: { fontSize: 28, fontWeight: '700', color: '#fff' },
   morningBadge: {
     fontSize: 11, color: '#555', letterSpacing: 1,
     borderWidth: 1, borderColor: '#222', borderRadius: 6,
     paddingHorizontal: 8, paddingVertical: 3,
   },
-  qualBadge: {
-    borderWidth: 1, borderRadius: 6,
-    paddingHorizontal: 8, paddingVertical: 3,
-  },
-  qualText: { fontSize: 11, fontWeight: '600', letterSpacing: 0.5 },
   ringRow: { alignItems: 'center', marginBottom: 24 },
   row: { flexDirection: 'row', marginBottom: 8 },
+  miniCard: {
+    flex: 1, backgroundColor: '#111', borderRadius: 14,
+    margin: 6, paddingHorizontal: 16, paddingVertical: 14,
+    alignItems: 'center',
+  },
+  miniValue: { fontSize: 26, fontWeight: '700', color: '#fff' },
+  miniLabel: { fontSize: 10, color: '#555', letterSpacing: 1.5, marginTop: 4 },
   chartBox: {
     backgroundColor: '#111', borderRadius: 14,
     padding: 16, margin: 6, marginTop: 8,

@@ -20,7 +20,8 @@
         ],
         "NSBluetoothAlwaysUsageDescription": "whoomp uses Bluetooth to connect to your WHOOP strap and read biometric data.",
         "NSBluetoothPeripheralUsageDescription": "whoomp uses Bluetooth to connect to your WHOOP strap and read biometric data.",
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSMotionUsageDescription": "whoomp uses Motion & Fitness to count your daily steps."
       }
     },
     "android": {

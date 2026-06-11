@@ -2,6 +2,7 @@ import * as SQLite from 'expo-sqlite';
 import { rmssd, filterRr } from '../metrics/hrv';
 import { strainScore } from '../metrics/strain';
 import { recoveryScore } from '../metrics/recovery';
+import { detectSleepWindow } from '../metrics/sleep';
 
 let _db: SQLite.SQLiteDatabase | null = null;
 
@@ -165,7 +166,28 @@ export async function rollupDay(dateStr?: string, age = 30): Promise<void> {
   );
   const recovery = recoveryScore(todayRmssd, history.map(r => r.rmssd));
 
-  await upsertDaily({ date, rmssd: todayRmssd, rhr, strain, sleep_minutes: null, recovery });
+  // Detect sleep from the night preceding this date (8pm prior day → 11am this day)
+  const [y, m, d] = date.split('-').map(Number);
+  const nightStart = Math.floor(new Date(y, m - 1, d - 1, 20, 0, 0).getTime() / 1000);
+  const nightEnd   = Math.floor(new Date(y, m - 1, d,     11, 0, 0).getTime() / 1000);
+  const nightRows = await db.getAllAsync<{ unix: number; hr: number | null; rr_json: string | null }>(
+    'SELECT unix, hr, rr_json FROM samples WHERE unix >= ? AND unix < ? ORDER BY unix ASC',
+    nightStart, nightEnd,
+  );
+  let sleep_minutes: number | null = null;
+  if (nightRows.length >= 10) {
+    const sleepSamples = nightRows.map(r => ({
+      ts_utc: new Date(r.unix * 1000).toISOString(),
+      heart_rate_bpm: r.hr,
+      rr_interval_ms: r.rr_json ? (JSON.parse(r.rr_json) as number[])[0] ?? null : null,
+    }));
+    const window = detectSleepWindow(sleepSamples, date);
+    if (window) {
+      sleep_minutes = Math.round((window[1].getTime() - window[0].getTime()) / 60_000);
+    }
+  }
+
+  await upsertDaily({ date, rmssd: todayRmssd, rhr, strain, sleep_minutes, recovery });
 }
 
 // Roll up every distinct calendar day that has samples and either:
