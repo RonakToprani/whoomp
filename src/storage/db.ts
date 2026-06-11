@@ -1,4 +1,7 @@
 import * as SQLite from 'expo-sqlite';
+import { rmssd, filterRr } from '../metrics/hrv';
+import { strainScore } from '../metrics/strain';
+import { recoveryScore } from '../metrics/recovery';
 
 let _db: SQLite.SQLiteDatabase | null = null;
 
@@ -78,6 +81,54 @@ export async function getDailyHistory(days: number): Promise<DailyRow[]> {
     'SELECT * FROM daily ORDER BY date DESC LIMIT ?',
     days,
   );
+}
+
+// Roll up all samples for a given date into the daily table.
+// dateStr defaults to today in local time. age used for strain estimate.
+export async function rollupDay(dateStr?: string, age = 30): Promise<void> {
+  const now = new Date();
+  const date = dateStr ?? [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, '0'),
+    String(now.getDate()).padStart(2, '0'),
+  ].join('-');
+
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startUnix = Math.floor(midnight.getTime() / 1000);
+  const endUnix = startUnix + 86400;
+
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ hr: number | null; rr_json: string | null }>(
+    'SELECT hr, rr_json FROM samples WHERE unix >= ? AND unix < ? ORDER BY unix ASC',
+    startUnix, endUnix,
+  );
+
+  if (rows.length === 0) return;
+
+  const hrSeries: number[] = [];
+  const allRr: number[] = [];
+  for (const row of rows) {
+    if (row.hr != null) hrSeries.push(row.hr);
+    if (row.rr_json) allRr.push(...(JSON.parse(row.rr_json) as number[]));
+  }
+
+  const todayRmssd = rmssd(filterRr(allRr));
+
+  // Resting HR: 5th-percentile of all readings (proxy for overnight min)
+  const sortedHr = [...hrSeries].sort((a, b) => a - b);
+  const rhr = sortedHr.length > 0 ? sortedHr[Math.floor(sortedHr.length * 0.05)] : null;
+
+  const strain = hrSeries.length > 0 ? strainScore(hrSeries, age) : null;
+
+  // Load prior history to compute recovery z-score
+  const history = await db.getAllAsync<{ rmssd: number | null }>(
+    "SELECT rmssd FROM daily WHERE date < ? ORDER BY date DESC LIMIT 14",
+    date,
+  );
+  const rmssdHistory = history.map(r => r.rmssd);
+  const recovery = recoveryScore(todayRmssd, rmssdHistory);
+
+  await upsertDaily({ date, rmssd: todayRmssd, rhr, strain, sleep_minutes: null, recovery });
 }
 
 export async function getRecentRrIntervals(sinceUnix: number): Promise<number[]> {

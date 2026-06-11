@@ -8,7 +8,17 @@
       "Bash(git pull *)",
       "Bash(gh repo *)",
       "Bash(gh search *)",
-      "Bash(gh api *)"
+      "Bash(gh api *)",
+      "Bash(npx tsc *)",
+      "Bash(npm install *)",
+      "Bash(npx expo *)",
+      "Bash(eas whoami *)",
+      "Bash(eas project:info)",
+      "Bash(npx eas *)",
+      "Bash(npm list *)",
+      "Bash(npm --version)",
+      "Bash(jobs -l)",
+      "Bash(ipconfig getifaddr *)"
     ]
   }
 }
