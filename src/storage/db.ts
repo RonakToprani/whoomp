@@ -5,9 +5,24 @@ import { recoveryScore } from '../metrics/recovery';
 
 let _db: SQLite.SQLiteDatabase | null = null;
 
+function localDateStr(d: Date): string {
+  return [
+    d.getFullYear(),
+    String(d.getMonth() + 1).padStart(2, '0'),
+    String(d.getDate()).padStart(2, '0'),
+  ].join('-');
+}
+
+function midnightUnix(dateStr: string): number {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return Math.floor(new Date(y, m - 1, d, 0, 0, 0, 0).getTime() / 1000);
+}
+
 export async function getDb(): Promise<SQLite.SQLiteDatabase> {
   if (_db) return _db;
   _db = await SQLite.openDatabaseAsync('whoomp.db');
+
+  // Bootstrap tables
   await _db.execAsync(`
     PRAGMA journal_mode = WAL;
     CREATE TABLE IF NOT EXISTS samples (
@@ -27,7 +42,30 @@ export async function getDb(): Promise<SQLite.SQLiteDatabase> {
       sleep_minutes INTEGER,
       recovery      REAL
     );
+    CREATE TABLE IF NOT EXISTS schema_version (v INTEGER PRIMARY KEY);
   `);
+
+  const row = await _db.getFirstAsync<{ v: number } | null>(
+    'SELECT v FROM schema_version ORDER BY v DESC LIMIT 1',
+  );
+  const version = row?.v ?? 0;
+
+  if (version < 1) {
+    // Dedup historical samples (keep earliest row per unix+flash_index pair)
+    await _db.execAsync(`
+      DELETE FROM samples
+        WHERE flash_index IS NOT NULL
+          AND id NOT IN (
+            SELECT MIN(id) FROM samples
+            WHERE flash_index IS NOT NULL
+            GROUP BY unix, flash_index
+          );
+      CREATE UNIQUE INDEX IF NOT EXISTS samples_dedup
+        ON samples (unix, flash_index);
+      INSERT OR IGNORE INTO schema_version (v) VALUES (1);
+    `);
+  }
+
   return _db;
 }
 
@@ -42,7 +80,7 @@ export interface SampleInsert {
 export async function insertSample(s: SampleInsert): Promise<void> {
   const db = await getDb();
   await db.runAsync(
-    'INSERT INTO samples (unix, hr, rr_json, flash_index, source) VALUES (?, ?, ?, ?, ?)',
+    'INSERT OR IGNORE INTO samples (unix, hr, rr_json, flash_index, source) VALUES (?, ?, ?, ?, ?)',
     s.unix,
     s.hr ?? null,
     s.rrIntervals.length > 0 ? JSON.stringify(s.rrIntervals) : null,
@@ -83,18 +121,23 @@ export async function getDailyHistory(days: number): Promise<DailyRow[]> {
   );
 }
 
-// Roll up all samples for a given date into the daily table.
-// dateStr defaults to today in local time. age used for strain estimate.
-export async function rollupDay(dateStr?: string, age = 30): Promise<void> {
-  const now = new Date();
-  const date = dateStr ?? [
-    now.getFullYear(),
-    String(now.getMonth() + 1).padStart(2, '0'),
-    String(now.getDate()).padStart(2, '0'),
-  ].join('-');
+export async function getRecentRrIntervals(sinceUnix: number): Promise<number[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ rr_json: string | null }>(
+    'SELECT rr_json FROM samples WHERE unix >= ? AND rr_json IS NOT NULL ORDER BY unix ASC',
+    sinceUnix,
+  );
+  const out: number[] = [];
+  for (const row of rows) {
+    if (row.rr_json) out.push(...(JSON.parse(row.rr_json) as number[]));
+  }
+  return out;
+}
 
-  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const startUnix = Math.floor(midnight.getTime() / 1000);
+// Roll up one calendar day from raw samples → daily table.
+export async function rollupDay(dateStr?: string, age = 30): Promise<void> {
+  const date = dateStr ?? localDateStr(new Date());
+  const startUnix = midnightUnix(date);
   const endUnix = startUnix + 86400;
 
   const db = await getDb();
@@ -102,7 +145,6 @@ export async function rollupDay(dateStr?: string, age = 30): Promise<void> {
     'SELECT hr, rr_json FROM samples WHERE unix >= ? AND unix < ? ORDER BY unix ASC',
     startUnix, endUnix,
   );
-
   if (rows.length === 0) return;
 
   const hrSeries: number[] = [];
@@ -113,36 +155,47 @@ export async function rollupDay(dateStr?: string, age = 30): Promise<void> {
   }
 
   const todayRmssd = rmssd(filterRr(allRr));
-
-  // Resting HR: 5th-percentile of all readings (proxy for overnight min)
   const sortedHr = [...hrSeries].sort((a, b) => a - b);
   const rhr = sortedHr.length > 0 ? sortedHr[Math.floor(sortedHr.length * 0.05)] : null;
-
   const strain = hrSeries.length > 0 ? strainScore(hrSeries, age) : null;
 
-  // Load prior history to compute recovery z-score
   const history = await db.getAllAsync<{ rmssd: number | null }>(
-    "SELECT rmssd FROM daily WHERE date < ? ORDER BY date DESC LIMIT 14",
+    'SELECT rmssd FROM daily WHERE date < ? ORDER BY date DESC LIMIT 14',
     date,
   );
-  const rmssdHistory = history.map(r => r.rmssd);
-  const recovery = recoveryScore(todayRmssd, rmssdHistory);
+  const recovery = recoveryScore(todayRmssd, history.map(r => r.rmssd));
 
   await upsertDaily({ date, rmssd: todayRmssd, rhr, strain, sleep_minutes: null, recovery });
 }
 
-export async function getRecentRrIntervals(sinceUnix: number): Promise<number[]> {
+// Roll up every distinct calendar day that has samples and either:
+//   - has no row in daily yet, OR
+//   - is today or yesterday (re-roll to capture freshly arrived data)
+export async function rollupAllDays(age = 30): Promise<void> {
   const db = await getDb();
-  const rows = await db.getAllAsync<{ rr_json: string | null }>(
-    'SELECT rr_json FROM samples WHERE unix >= ? AND rr_json IS NOT NULL ORDER BY unix ASC',
-    sinceUnix,
+  const today = localDateStr(new Date());
+  const yesterday = localDateStr(new Date(Date.now() - 86400_000));
+
+  const dates = await db.getAllAsync<{ date: string }>(
+    `SELECT DISTINCT date(unix, 'unixepoch', 'localtime') AS date
+     FROM samples
+     WHERE date(unix, 'unixepoch', 'localtime') IS NOT NULL
+       AND (
+         date(unix, 'unixepoch', 'localtime') NOT IN (SELECT date FROM daily)
+         OR date(unix, 'unixepoch', 'localtime') = ?
+         OR date(unix, 'unixepoch', 'localtime') = ?
+       )
+     ORDER BY date ASC`,
+    today, yesterday,
   );
-  const out: number[] = [];
-  for (const row of rows) {
-    if (row.rr_json) {
-      const arr = JSON.parse(row.rr_json) as number[];
-      out.push(...arr);
-    }
+
+  for (const { date } of dates) {
+    await rollupDay(date, age);
   }
-  return out;
+}
+
+export async function getSampleCount(): Promise<number> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ n: number }>('SELECT COUNT(*) AS n FROM samples');
+  return row?.n ?? 0;
 }

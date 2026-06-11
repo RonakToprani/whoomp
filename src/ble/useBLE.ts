@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WhoopClient, ClientState } from './WhoopClient';
-import { insertSample, rollupDay } from '../storage/db';
+import { insertSample, rollupAllDays, getRecentRrIntervals } from '../storage/db';
 import { rmssd, filterRr } from '../metrics/hrv';
 
 const RR_WINDOW = 300;
@@ -25,24 +25,15 @@ export function useBLE() {
   const [battery, setBattery] = useState<number | null>(null);
   const [hrv, setHrv] = useState<number | null>(null);
 
+  // On launch: roll up all days that have samples but no daily row yet
   useEffect(() => {
-    // Roll up any samples already in DB from previous sessions (today + yesterday)
-    getAge().then(age => {
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      const yStr = [
-        yesterday.getFullYear(),
-        String(yesterday.getMonth() + 1).padStart(2, '0'),
-        String(yesterday.getDate()).padStart(2, '0'),
-      ].join('-');
-      rollupDay(yStr, age).catch(() => {});
-      rollupDay(undefined, age).catch(() => {});
-    });
+    getAge().then(age => rollupAllDays(age)).catch(() => {});
 
     const client = new WhoopClient();
     clientRef.current = client;
     const off = [
       client.on<ClientState>('state', setState),
+
       client.on<{ heartRateBpm: number | null; rrIntervalsMs: number[]; receivedAt: number }>(
         'realtime',
         ({ heartRateBpm, rrIntervalsMs, receivedAt }) => {
@@ -60,6 +51,7 @@ export function useBLE() {
           }).catch(() => {});
         }
       ),
+
       client.on<{ unix: number; heartRateBpm: number | null; rrIntervalsMs: number[]; flashIndex: number }>(
         'historicalSample',
         ({ unix, heartRateBpm, rrIntervalsMs, flashIndex }) => {
@@ -72,24 +64,29 @@ export function useBLE() {
           }).catch(() => {});
         }
       ),
-      // After flash drain completes, re-roll up today (+ yesterday in case drain crossed midnight)
+
+      // Flash drain finished — roll up every day that now has new data
       client.on<{ samples: number }>('historyComplete', () => {
-        getAge().then(age => {
-          const yesterday = new Date();
-          yesterday.setDate(yesterday.getDate() - 1);
-          const yStr = [
-            yesterday.getFullYear(),
-            String(yesterday.getMonth() + 1).padStart(2, '0'),
-            String(yesterday.getDate()).padStart(2, '0'),
-          ].join('-');
-          rollupDay(yStr, age).catch(() => {});
-          rollupDay(undefined, age).catch(() => {});
-        });
+        getAge().then(age => rollupAllDays(age)).catch(() => {});
       }),
+
       client.on<number>('battery', setBattery),
     ];
     return () => { off.forEach(fn => fn()); client.destroy(); };
   }, []);
+
+  // When BLE connects, seed HRV from the last 5 min of stored RR intervals
+  // so the metric isn't blank while waiting for the first live packets
+  useEffect(() => {
+    if (state !== 'connected') return;
+    const sinceUnix = Math.floor(Date.now() / 1000) - 300;
+    getRecentRrIntervals(sinceUnix).then(intervals => {
+      if (intervals.length >= 5) {
+        setRr(intervals.slice(-RR_WINDOW));
+        setHrv(rmssd(filterRr(intervals)));
+      }
+    }).catch(() => {});
+  }, [state]);
 
   const scan = useCallback(() => clientRef.current?.scan(), []);
   const disconnect = useCallback(() => clientRef.current?.disconnect(), []);

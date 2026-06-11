@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, TextInput } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, TextInput, Share, Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useBleContext } from '../ble/BleContext';
+import { getDailyHistory, getSampleCount } from '../storage/db';
 
 const AGE_KEY = '@whoomp/age';
 const WRIST_KEY = '@whoomp/wrist';
@@ -10,10 +11,12 @@ export default function SettingsScreen() {
   const { state, disconnect } = useBleContext();
   const [age, setAge] = useState('');
   const [wrist, setWrist] = useState<'left' | 'right'>('left');
+  const [sampleCount, setSampleCount] = useState<number | null>(null);
 
   useEffect(() => {
     AsyncStorage.getItem(AGE_KEY).then(v => { if (v) setAge(v); }).catch(() => {});
     AsyncStorage.getItem(WRIST_KEY).then(v => { if (v === 'right') setWrist('right'); }).catch(() => {});
+    getSampleCount().then(setSampleCount).catch(() => {});
   }, []);
 
   const saveAge = (val: string) => {
@@ -24,6 +27,21 @@ export default function SettingsScreen() {
   const saveWrist = (val: 'left' | 'right') => {
     setWrist(val);
     AsyncStorage.setItem(WRIST_KEY, val).catch(() => {});
+  };
+
+  const exportData = async () => {
+    try {
+      const rows = await getDailyHistory(30);
+      const csv = [
+        'date,rmssd_ms,resting_hr_bpm,strain,recovery_pct',
+        ...rows.map(r =>
+          [r.date, r.rmssd ?? '', r.rhr ?? '', r.strain ?? '', r.recovery ?? ''].join(',')
+        ),
+      ].join('\n');
+      await Share.share({ title: 'Whoomp Data Export', message: csv });
+    } catch {
+      Alert.alert('Export failed');
+    }
   };
 
   return (
@@ -41,7 +59,7 @@ export default function SettingsScreen() {
           placeholder="30"
           placeholderTextColor="#333"
         />
-        <Text style={styles.hint}>Used for max HR and calorie estimates</Text>
+        <Text style={styles.hint}>Used for max HR and strain estimates</Text>
       </View>
 
       <View style={styles.section}>
@@ -68,10 +86,20 @@ export default function SettingsScreen() {
           <Text style={styles.statusText}>{state}</Text>
         </View>
         {state === 'connected' && (
-          <TouchableOpacity style={styles.disconnectBtn} onPress={() => disconnect()}>
-            <Text style={styles.disconnectText}>Disconnect</Text>
+          <TouchableOpacity style={styles.outlineBtn} onPress={() => disconnect()}>
+            <Text style={styles.outlineBtnText}>Disconnect</Text>
           </TouchableOpacity>
         )}
+      </View>
+
+      <View style={styles.section}>
+        <Text style={styles.sectionLabel}>DATA</Text>
+        {sampleCount != null && (
+          <Text style={styles.dataLine}>{sampleCount.toLocaleString()} samples stored</Text>
+        )}
+        <TouchableOpacity style={[styles.outlineBtn, { marginTop: 12 }]} onPress={exportData}>
+          <Text style={styles.outlineBtnText}>Export last 30 days (CSV)</Text>
+        </TouchableOpacity>
       </View>
     </View>
   );
@@ -83,38 +111,26 @@ const styles = StyleSheet.create({
   section: { marginBottom: 32 },
   sectionLabel: { fontSize: 11, color: '#555', letterSpacing: 1.5, marginBottom: 12 },
   input: {
-    backgroundColor: '#111',
-    color: '#fff',
-    fontSize: 20,
-    fontWeight: '600',
-    padding: 14,
-    borderRadius: 10,
-    width: 100,
+    backgroundColor: '#111', color: '#fff', fontSize: 20, fontWeight: '600',
+    padding: 14, borderRadius: 10, width: 100,
   },
   hint: { fontSize: 12, color: '#333', marginTop: 8 },
   segmented: { flexDirection: 'row', gap: 8 },
   seg: {
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 10,
-    backgroundColor: '#111',
-    borderWidth: 1,
-    borderColor: '#222',
+    paddingHorizontal: 24, paddingVertical: 12, borderRadius: 10,
+    backgroundColor: '#111', borderWidth: 1, borderColor: '#222',
   },
   segActive: { backgroundColor: '#fff', borderColor: '#fff' },
   segText: { fontSize: 16, color: '#555', fontWeight: '600' },
   segTextActive: { color: '#000' },
-  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 16 },
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 12 },
   dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#444' },
   dotGreen: { backgroundColor: '#4ade80' },
   statusText: { fontSize: 14, color: '#888', textTransform: 'capitalize' },
-  disconnectBtn: {
-    borderWidth: 1,
-    borderColor: '#333',
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 10,
-    alignSelf: 'flex-start',
+  outlineBtn: {
+    borderWidth: 1, borderColor: '#333', paddingVertical: 12, paddingHorizontal: 24,
+    borderRadius: 10, alignSelf: 'flex-start',
   },
-  disconnectText: { fontSize: 14, color: '#888' },
+  outlineBtnText: { fontSize: 14, color: '#888' },
+  dataLine: { fontSize: 14, color: '#555' },
 });
