@@ -2,17 +2,8 @@ import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { useBleContext } from '../ble/BleContext';
 
-type Props = {
-  navigation: { navigate: (screen: string) => void };
-};
-
-export default function LiveScreen({ navigation }: Props) {
+export default function LiveScreen() {
   const { heartRate, battery, hrv, disconnect } = useBleContext();
-
-  const handleDisconnect = async () => {
-    await disconnect();
-    navigation.navigate('Scan');
-  };
 
   return (
     <View style={styles.container}>
@@ -30,7 +21,7 @@ export default function LiveScreen({ navigation }: Props) {
         </Text>
         <Text style={styles.hrvUnit}>ms</Text>
       </View>
-      <TouchableOpacity style={styles.button} onPress={handleDisconnect}>
+      <TouchableOpacity style={styles.button} onPress={() => disconnect()}>
         <Text style={styles.buttonText}>Disconnect</Text>
       </TouchableOpacity>
     </View>
