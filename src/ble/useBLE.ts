@@ -3,8 +3,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WhoopClient, ClientState } from './WhoopClient';
 import { insertSample, rollupAllDays, getRecentRrIntervals } from '../storage/db';
 import { rmssd, filterRr } from '../metrics/hrv';
+import { caloriesFromHrSeries } from '../metrics/zones';
 
-const RR_WINDOW = 300;
+const RR_WINDOW = 300;   // ~5 min of RR intervals
+const HR_BUFFER = 60;    // 60-second live sparkline
 const AGE_KEY = '@whoomp/age';
 
 async function getAge(): Promise<number> {
@@ -12,9 +14,7 @@ async function getAge(): Promise<number> {
     const v = await AsyncStorage.getItem(AGE_KEY);
     const n = v ? parseInt(v, 10) : NaN;
     return Number.isFinite(n) && n > 0 ? n : 30;
-  } catch {
-    return 30;
-  }
+  } catch { return 30; }
 }
 
 export function useBLE() {
@@ -24,8 +24,13 @@ export function useBLE() {
   const [rr, setRr] = useState<number[]>([]);
   const [battery, setBattery] = useState<number | null>(null);
   const [hrv, setHrv] = useState<number | null>(null);
+  const [hrBuffer60, setHrBuffer60] = useState<(number | null)[]>([]);
+  const [sessionStartUnix, setSessionStartUnix] = useState<number | null>(null);
+  const [calories, setCalories] = useState<number>(0);
 
-  // On launch: roll up all days that have samples but no daily row yet
+  // Accumulate today's HR series for calorie estimate (persists across re-renders)
+  const hrTodayRef = useRef<number[]>([]);
+
   useEffect(() => {
     getAge().then(age => rollupAllDays(age)).catch(() => {});
 
@@ -38,11 +43,25 @@ export function useBLE() {
         'realtime',
         ({ heartRateBpm, rrIntervalsMs, receivedAt }) => {
           setHeartRate(heartRateBpm);
+
+          // RR window for HRV
           setRr(prev => {
             const next = [...prev.slice(-RR_WINDOW), ...rrIntervalsMs];
             setHrv(rmssd(filterRr(next)));
             return next;
           });
+
+          // 60-second HR sparkline
+          if (heartRateBpm != null) {
+            setHrBuffer60(prev => [...prev.slice(-(HR_BUFFER - 1)), heartRateBpm]);
+
+            // Running calorie total — accumulate all HR readings since mount
+            hrTodayRef.current.push(heartRateBpm);
+            getAge().then(age => {
+              setCalories(caloriesFromHrSeries(hrTodayRef.current, age, null, null));
+            });
+          }
+
           insertSample({
             unix: Math.floor(receivedAt / 1000),
             hr: heartRateBpm,
@@ -56,16 +75,12 @@ export function useBLE() {
         'historicalSample',
         ({ unix, heartRateBpm, rrIntervalsMs, flashIndex }) => {
           insertSample({
-            unix,
-            hr: heartRateBpm,
-            rrIntervals: rrIntervalsMs,
-            flashIndex,
+            unix, hr: heartRateBpm, rrIntervals: rrIntervalsMs, flashIndex,
             source: 'historical',
           }).catch(() => {});
         }
       ),
 
-      // Flash drain finished — roll up every day that now has new data
       client.on<{ samples: number }>('historyComplete', () => {
         getAge().then(age => rollupAllDays(age)).catch(() => {});
       }),
@@ -75,10 +90,10 @@ export function useBLE() {
     return () => { off.forEach(fn => fn()); client.destroy(); };
   }, []);
 
-  // When BLE connects, seed HRV from the last 5 min of stored RR intervals
-  // so the metric isn't blank while waiting for the first live packets
+  // Seed HRV + mark session start when BLE connects
   useEffect(() => {
     if (state !== 'connected') return;
+    setSessionStartUnix(Math.floor(Date.now() / 1000));
     const sinceUnix = Math.floor(Date.now() / 1000) - 300;
     getRecentRrIntervals(sinceUnix).then(intervals => {
       if (intervals.length >= 5) {
@@ -91,5 +106,5 @@ export function useBLE() {
   const scan = useCallback(() => clientRef.current?.scan(), []);
   const disconnect = useCallback(() => clientRef.current?.disconnect(), []);
 
-  return { state, heartRate, rr, battery, hrv, scan, disconnect };
+  return { state, heartRate, rr, battery, hrv, hrBuffer60, sessionStartUnix, calories, scan, disconnect };
 }

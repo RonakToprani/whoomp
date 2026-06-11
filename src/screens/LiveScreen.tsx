@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, useWindowDimensions } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useBleContext } from '../ble/BleContext';
 import { zoneForHr, maxHr } from '../metrics/zones';
+import HRChart from '../components/HRChart';
 
 const AGE_KEY = '@whoomp/age';
 
@@ -14,9 +15,19 @@ const ZONE_META: Record<number, { label: string; color: string }> = {
   5: { label: 'Z5', color: '#ef4444' },
 };
 
+function formatDuration(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 export default function LiveScreen() {
-  const { heartRate, battery, hrv, disconnect } = useBleContext();
+  const { heartRate, battery, hrv, hrBuffer60, sessionStartUnix, calories, disconnect } = useBleContext();
   const [age, setAge] = useState(30);
+  const [elapsed, setElapsed] = useState(0);
+  const { width } = useWindowDimensions();
 
   useEffect(() => {
     AsyncStorage.getItem(AGE_KEY).then(v => {
@@ -25,8 +36,17 @@ export default function LiveScreen() {
     }).catch(() => {});
   }, []);
 
+  useEffect(() => {
+    if (sessionStartUnix == null) { setElapsed(0); return; }
+    const tick = () => setElapsed(Math.floor(Date.now() / 1000) - sessionStartUnix);
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [sessionStartUnix]);
+
   const zone = heartRate != null ? zoneForHr(heartRate, maxHr(age)) : null;
   const zoneMeta = zone != null ? ZONE_META[zone] : null;
+  const chartWidth = width - 64;
 
   return (
     <View style={styles.container}>
@@ -52,6 +72,29 @@ export default function LiveScreen() {
         </Text>
         <Text style={styles.hrvUnit}>ms</Text>
       </View>
+
+      {hrBuffer60.length > 2 && (
+        <View style={[styles.sparklineBox, { width: chartWidth }]}>
+          <HRChart data={hrBuffer60} width={chartWidth} height={40} />
+        </View>
+      )}
+
+      {(sessionStartUnix != null || calories > 0) && (
+        <View style={styles.statsRow}>
+          {sessionStartUnix != null && (
+            <View style={styles.statItem}>
+              <Text style={styles.statValue}>{formatDuration(elapsed)}</Text>
+              <Text style={styles.statLabel}>SESSION</Text>
+            </View>
+          )}
+          {calories > 0 && (
+            <View style={styles.statItem}>
+              <Text style={styles.statValue}>{Math.round(calories)}</Text>
+              <Text style={styles.statLabel}>KCAL</Text>
+            </View>
+          )}
+        </View>
+      )}
 
       <TouchableOpacity style={styles.button} onPress={() => disconnect()}>
         <Text style={styles.buttonText}>Disconnect</Text>
@@ -80,8 +123,13 @@ const styles = StyleSheet.create({
   hrvLabel: { fontSize: 14, color: '#666', letterSpacing: 1 },
   hrvValue: { fontSize: 40, fontWeight: '600', color: '#fff' },
   hrvUnit: { fontSize: 14, color: '#666' },
+  sparklineBox: { marginTop: 20, height: 40 },
+  statsRow: { flexDirection: 'row', gap: 48, marginTop: 32 },
+  statItem: { alignItems: 'center', gap: 4 },
+  statValue: { fontSize: 22, fontWeight: '600', color: '#fff' },
+  statLabel: { fontSize: 10, color: '#555', letterSpacing: 1.5 },
   button: {
-    marginTop: 64, borderWidth: 1, borderColor: '#444',
+    marginTop: 48, borderWidth: 1, borderColor: '#444',
     paddingHorizontal: 32, paddingVertical: 14, borderRadius: 12,
   },
   buttonText: { fontSize: 16, color: '#888' },

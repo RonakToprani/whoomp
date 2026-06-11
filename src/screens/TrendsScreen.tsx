@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, ScrollView, StyleSheet, useWindowDimensions } from 'react-native';
-import Svg, { Polyline, Line } from 'react-native-svg';
+import Svg, { Polyline, Line, Circle } from 'react-native-svg';
 import { getDailyHistory, DailyRow } from '../storage/db';
 
 const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -22,10 +22,10 @@ function TrendChart({
   color: string;
 }) {
   const valid = data.filter((v): v is number => v != null);
-  if (valid.length < 2) {
+  if (valid.length === 0) {
     return (
       <View style={{ width, height, alignItems: 'center', justifyContent: 'center' }}>
-        <Text style={{ color: '#333', fontSize: 12 }}>not enough data</Text>
+        <Text style={{ color: '#333', fontSize: 12 }}>no data yet</Text>
       </View>
     );
   }
@@ -35,6 +35,14 @@ function TrendChart({
   const step = width / Math.max(data.length - 1, 1);
   const avg = valid.reduce((a, b) => a + b, 0) / valid.length;
   const avgY = height - ((avg - min) / range) * height;
+
+  if (valid.length === 1) {
+    return (
+      <Svg width={width} height={height}>
+        <Circle cx={width / 2} cy={height / 2} r={4} fill={color} />
+      </Svg>
+    );
+  }
 
   const points = data
     .map((v, i) => {
@@ -46,7 +54,6 @@ function TrendChart({
 
   return (
     <Svg width={width} height={height}>
-      {/* Average reference line */}
       <Line
         x1={0} y1={avgY} x2={width} y2={avgY}
         stroke="#2a2a2a" strokeWidth={1} strokeDasharray="4 4"

@@ -1,26 +1,40 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { View, Text, ScrollView, StyleSheet, useWindowDimensions, AppState } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, useWindowDimensions, AppState, RefreshControl } from 'react-native';
 import RecoveryRing from '../components/RecoveryRing';
 import MetricCard from '../components/MetricCard';
 import HRChart from '../components/HRChart';
 import { useBleContext } from '../ble/BleContext';
 import { getDailyHistory, DailyRow } from '../storage/db';
 
+function hrvQuality(ms: number): { label: string; color: string } {
+  if (ms >= 80) return { label: 'Excellent', color: '#4ade80' };
+  if (ms >= 60) return { label: 'Above avg', color: '#86efac' };
+  if (ms >= 40) return { label: 'Average', color: '#fbbf24' };
+  if (ms >= 20) return { label: 'Below avg', color: '#f97316' };
+  return { label: 'Low', color: '#f87171' };
+}
+
 export default function HomeScreen() {
-  const { heartRate, hrv, rr, state } = useBleContext();
+  const { heartRate, hrv, rr, state, calories } = useBleContext();
   const [today, setToday] = useState<DailyRow | null>(null);
   const [yesterday, setYesterday] = useState<DailyRow | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const { width } = useWindowDimensions();
 
-  const refresh = useCallback(() => {
-    getDailyHistory(2).then(rows => {
+  const refresh = useCallback(async () => {
+    try {
+      const rows = await getDailyHistory(2);
       const todayStr = new Date().toISOString().slice(0, 10);
-      const t = rows.find(r => r.date === todayStr) ?? null;
-      const y = rows.find(r => r.date !== todayStr) ?? null;
-      setToday(t);
-      setYesterday(y);
-    }).catch(() => {});
+      setToday(rows.find(r => r.date === todayStr) ?? null);
+      setYesterday(rows.find(r => r.date !== todayStr) ?? null);
+    } catch {}
   }, []);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await refresh();
+    setRefreshing(false);
+  }, [refresh]);
 
   useEffect(() => {
     refresh();
@@ -30,11 +44,9 @@ export default function HomeScreen() {
 
   useEffect(() => { refresh(); }, [state, refresh]);
 
-  // Decide which row to feature: today if it has data, else yesterday (morning view)
   const featured = (today?.rmssd != null || today?.rhr != null) ? today : yesterday;
   const isMorningView = featured === yesterday && yesterday != null;
 
-  // Live HRV overrides stored value while connected
   const displayHrv = hrv ?? featured?.rmssd ?? null;
   const recovery = featured?.recovery ?? null;
   const strain = featured?.strain ?? null;
@@ -45,12 +57,23 @@ export default function HomeScreen() {
   );
   const chartWidth = width - 48;
 
+  const qual = displayHrv != null && recovery == null ? hrvQuality(displayHrv) : null;
+
   return (
-    <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
+    <ScrollView
+      style={styles.scroll}
+      contentContainerStyle={styles.content}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#555" />}
+    >
       <View style={styles.titleRow}>
         <Text style={styles.title}>{isMorningView ? 'Yesterday' : 'Today'}</Text>
         {isMorningView && (
           <Text style={styles.morningBadge}>morning view</Text>
+        )}
+        {qual && (
+          <View style={[styles.qualBadge, { borderColor: qual.color }]}>
+            <Text style={[styles.qualText, { color: qual.color }]}>{qual.label}</Text>
+          </View>
         )}
       </View>
 
@@ -67,6 +90,12 @@ export default function HomeScreen() {
         <MetricCard label="RESTING HR" value={rhr != null ? Math.round(rhr) : null} unit="bpm" />
         <MetricCard label="STRAIN" value={strain != null ? (Math.round(strain * 10) / 10) : null} unit="/ 21" />
       </View>
+
+      {calories > 0 && (
+        <View style={styles.row}>
+          <MetricCard label="CALORIES" value={Math.round(calories)} unit="kcal" />
+        </View>
+      )}
 
       {liveHrSlice.length > 4 && (
         <View style={styles.chartBox}>
@@ -85,13 +114,18 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   scroll: { flex: 1, backgroundColor: '#000' },
   content: { padding: 16, paddingBottom: 40 },
-  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 24 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 24, flexWrap: 'wrap' },
   title: { fontSize: 28, fontWeight: '700', color: '#fff' },
   morningBadge: {
     fontSize: 11, color: '#555', letterSpacing: 1,
     borderWidth: 1, borderColor: '#222', borderRadius: 6,
     paddingHorizontal: 8, paddingVertical: 3,
   },
+  qualBadge: {
+    borderWidth: 1, borderRadius: 6,
+    paddingHorizontal: 8, paddingVertical: 3,
+  },
+  qualText: { fontSize: 11, fontWeight: '600', letterSpacing: 0.5 },
   ringRow: { alignItems: 'center', marginBottom: 24 },
   row: { flexDirection: 'row', marginBottom: 8 },
   chartBox: {
