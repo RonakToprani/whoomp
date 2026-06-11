@@ -7,7 +7,7 @@ type Props = {
 };
 
 export default function LiveScreen({ navigation }: Props) {
-  const { heartRate, battery, disconnect } = useBleContext();
+  const { heartRate, battery, hrv, disconnect } = useBleContext();
 
   const handleDisconnect = async () => {
     await disconnect();
@@ -23,6 +23,13 @@ export default function LiveScreen({ navigation }: Props) {
         {heartRate ?? '--'}
       </Text>
       <Text style={styles.unit}>BPM</Text>
+      <View style={styles.hrvRow}>
+        <Text style={styles.hrvLabel}>HRV</Text>
+        <Text style={[styles.hrvValue, hrv == null && styles.bpmNull]}>
+          {hrv != null ? Math.round(hrv) : '--'}
+        </Text>
+        <Text style={styles.hrvUnit}>ms</Text>
+      </View>
       <TouchableOpacity style={styles.button} onPress={handleDisconnect}>
         <Text style={styles.buttonText}>Disconnect</Text>
       </TouchableOpacity>
@@ -57,6 +64,26 @@ const styles = StyleSheet.create({
     fontSize: 24,
     color: '#888',
     marginTop: 4,
+  },
+  hrvRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    marginTop: 32,
+    gap: 8,
+  },
+  hrvLabel: {
+    fontSize: 14,
+    color: '#666',
+    letterSpacing: 1,
+  },
+  hrvValue: {
+    fontSize: 40,
+    fontWeight: '600',
+    color: '#fff',
+  },
+  hrvUnit: {
+    fontSize: 14,
+    color: '#666',
   },
   button: {
     marginTop: 64,
