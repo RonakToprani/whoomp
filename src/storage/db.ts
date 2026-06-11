@@ -156,9 +156,22 @@ export async function rollupDay(dateStr?: string, age = 30): Promise<void> {
   }
 
   const todayRmssd = rmssd(filterRr(allRr));
-  const sortedHr = [...hrSeries].sort((a, b) => a - b);
-  const rhr = sortedHr.length > 0 ? sortedHr[Math.floor(sortedHr.length * 0.05)] : null;
-  const strain = hrSeries.length > 0 ? strainScore(hrSeries, age) : null;
+
+  // RHR: use overnight window (8pm prior night → 8am this day) for true resting state
+  // Falls back to all-day 5th percentile when overnight data is missing
+  const [y, m, d] = date.split('-').map(Number);
+  const nightStart = Math.floor(new Date(y, m - 1, d - 1, 20, 0, 0).getTime() / 1000);
+  const nightEnd   = Math.floor(new Date(y, m - 1, d,     11, 0, 0).getTime() / 1000);
+  const overnightHrRows = await db.getAllAsync<{ hr: number }>(
+    'SELECT hr FROM samples WHERE unix >= ? AND unix < ? AND hr IS NOT NULL AND hr >= 30 AND hr <= 120 ORDER BY unix ASC',
+    nightStart, Math.floor(new Date(y, m - 1, d, 8, 0, 0).getTime() / 1000),
+  );
+  const overnightHr = overnightHrRows.map(r => r.hr).sort((a, b) => a - b);
+  const fallbackHr = [...hrSeries.filter(h => h >= 30 && h <= 120)].sort((a, b) => a - b);
+  const rhrSource = overnightHr.length >= 20 ? overnightHr : fallbackHr;
+  const rhr = rhrSource.length > 0 ? rhrSource[Math.floor(rhrSource.length * 0.05)] : null;
+
+  const strain = hrSeries.length > 0 ? strainScore(hrSeries, age, rhr) : null;
 
   const history = await db.getAllAsync<{ rmssd: number | null }>(
     'SELECT rmssd FROM daily WHERE date < ? ORDER BY date DESC LIMIT 14',
@@ -166,10 +179,7 @@ export async function rollupDay(dateStr?: string, age = 30): Promise<void> {
   );
   const recovery = recoveryScore(todayRmssd, history.map(r => r.rmssd));
 
-  // Detect sleep from the night preceding this date (8pm prior day → 11am this day)
-  const [y, m, d] = date.split('-').map(Number);
-  const nightStart = Math.floor(new Date(y, m - 1, d - 1, 20, 0, 0).getTime() / 1000);
-  const nightEnd   = Math.floor(new Date(y, m - 1, d,     11, 0, 0).getTime() / 1000);
+  // Sleep: detect window in the night preceding this date (8pm prior day → 11am this day)
   const nightRows = await db.getAllAsync<{ unix: number; hr: number | null; rr_json: string | null }>(
     'SELECT unix, hr, rr_json FROM samples WHERE unix >= ? AND unix < ? ORDER BY unix ASC',
     nightStart, nightEnd,

@@ -12,7 +12,7 @@ export function strainScore(
   }
   if (samples.length === 0) return 0.0;
   const maxHr = 220 - age;
-  const rest = restingHr ? restingHr : Math.min(...samples);
+  const rest = restingHr && restingHr > 20 ? restingHr : Math.min(...samples);
   if (maxHr <= rest) return 0.0;
   const minutes = samples.length / 60.0;
   let sumSq = 0.0;
@@ -20,8 +20,10 @@ export function strainScore(
     const intensity = Math.max(0.0, (h - rest) / (maxHr - rest));
     sumSq += intensity * intensity;
   }
-  const load = sumSq * ((minutes / Math.max(samples.length, 1)) * 60);
-  return Math.round(21.0 * (1.0 - Math.exp(-load / 100.0)) * 100) / 100;
+  // mean intensity² × duration in minutes, normalised so ~1h at Z4 ≈ 13–15
+  const meanSq = sumSq / samples.length;
+  const load = meanSq * minutes;
+  return Math.round(21.0 * (1.0 - Math.exp(-load / 50.0)) * 100) / 100;
 }
 
 export interface AcwrResult {
