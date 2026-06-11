@@ -8,14 +8,13 @@ import { useBleContext } from '../ble/BleContext';
 import { getDailyHistory, DailyRow } from '../storage/db';
 
 export default function HomeScreen() {
-  const { heartRate, hrv, rr, state, calories } = useBleContext();
+  const { heartRate, hrv, state, calories, hrBuffer60 } = useBleContext();
   const [today, setToday] = useState<DailyRow | null>(null);
   const [yesterday, setYesterday] = useState<DailyRow | null>(null);
   const [steps, setSteps] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const { width } = useWindowDimensions();
 
-  // Pedometer: watch live step count for today
   useEffect(() => {
     let sub: { remove: () => void } | null = null;
     Pedometer.isAvailableAsync().then(ok => {
@@ -59,10 +58,8 @@ export default function HomeScreen() {
   const strain = featured?.strain ?? null;
   const rhr = featured?.rhr ?? null;
 
-  const liveHrSlice: (number | null)[] = rr.slice(-300).map(ms =>
-    ms > 0 ? Math.round(60000 / ms) : null
-  );
-  const chartWidth = width - 48;
+  // content padding 16+16, chartBox margin 6+6, chartBox padding 16+16
+  const chartWidth = width - 76;
 
   return (
     <ScrollView
@@ -91,23 +88,15 @@ export default function HomeScreen() {
         <MetricCard label="STRAIN" value={strain != null ? (Math.round(strain * 10) / 10) : null} unit="/ 21" />
       </View>
 
-      {(calories > 0 || steps != null) && (
-        <View style={styles.row}>
-          <View style={styles.miniCard}>
-            <Text style={styles.miniValue}>{calories > 0 ? Math.round(calories) : '--'}</Text>
-            <Text style={styles.miniLabel}>KCAL</Text>
-          </View>
-          <View style={styles.miniCard}>
-            <Text style={styles.miniValue}>{steps != null ? steps.toLocaleString() : '--'}</Text>
-            <Text style={styles.miniLabel}>STEPS</Text>
-          </View>
-        </View>
-      )}
+      <View style={styles.row}>
+        <MetricCard label="CALORIES" value={calories > 0 ? Math.round(calories) : null} unit="kcal" />
+        <MetricCard label="STEPS" value={steps != null ? steps.toLocaleString() : null} unit="today" />
+      </View>
 
-      {liveHrSlice.length > 4 && (
+      {hrBuffer60.length > 4 && (
         <View style={styles.chartBox}>
           <Text style={styles.chartLabel}>LIVE HR</Text>
-          <HRChart data={liveHrSlice} width={chartWidth} height={56} />
+          <HRChart data={hrBuffer60} width={chartWidth} height={56} />
         </View>
       )}
 
@@ -130,13 +119,6 @@ const styles = StyleSheet.create({
   },
   ringRow: { alignItems: 'center', marginBottom: 24 },
   row: { flexDirection: 'row', marginBottom: 8 },
-  miniCard: {
-    flex: 1, backgroundColor: '#111', borderRadius: 14,
-    margin: 6, paddingHorizontal: 16, paddingVertical: 14,
-    alignItems: 'center',
-  },
-  miniValue: { fontSize: 26, fontWeight: '700', color: '#fff' },
-  miniLabel: { fontSize: 10, color: '#555', letterSpacing: 1.5, marginTop: 4 },
   chartBox: {
     backgroundColor: '#111', borderRadius: 14,
     padding: 16, margin: 6, marginTop: 8,

@@ -15,14 +15,17 @@ import SettingsScreen from './src/screens/SettingsScreen';
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
 
-function TabIcon({ emoji, label, focused }: { emoji: string; label: string; focused: boolean }) {
+function TabLabel({ label, focused }: { label: string; focused: boolean }) {
   return (
-    <>
-      <Text style={{ fontSize: 20, lineHeight: 24 }}>{emoji}</Text>
-      <Text style={{ fontSize: 10, color: focused ? '#fff' : '#555', marginTop: 2, letterSpacing: 0.3 }}>
-        {label}
-      </Text>
-    </>
+    <Text style={{
+      fontSize: 12,
+      color: focused ? '#fff' : '#555',
+      fontWeight: focused ? '600' : '400',
+      letterSpacing: 0.3,
+      marginTop: 4,
+    }}>
+      {label}
+    </Text>
   );
 }
 
@@ -31,34 +34,34 @@ function MainTabs() {
     <Tab.Navigator
       screenOptions={{
         headerShown: false,
-        tabBarStyle: { backgroundColor: '#0a0a0a', borderTopColor: '#1a1a1a', paddingBottom: 6, height: 64 },
+        tabBarStyle: { backgroundColor: '#0a0a0a', borderTopColor: '#1a1a1a', height: 60, paddingBottom: 8 },
         tabBarShowLabel: false,
       }}
     >
       <Tab.Screen
         name="Home"
         component={HomeScreen}
-        options={{ tabBarIcon: ({ focused }) => <TabIcon emoji="🏠" label="Home" focused={focused} /> }}
+        options={{ tabBarIcon: ({ focused }) => <TabLabel label="Home" focused={focused} /> }}
       />
       <Tab.Screen
         name="Live"
         component={LiveScreen}
-        options={{ tabBarIcon: ({ focused }) => <TabIcon emoji="❤️" label="Live" focused={focused} /> }}
+        options={{ tabBarIcon: ({ focused }) => <TabLabel label="Live" focused={focused} /> }}
       />
       <Tab.Screen
         name="Trends"
         component={TrendsScreen}
-        options={{ tabBarIcon: ({ focused }) => <TabIcon emoji="📈" label="Trends" focused={focused} /> }}
+        options={{ tabBarIcon: ({ focused }) => <TabLabel label="Trends" focused={focused} /> }}
       />
       <Tab.Screen
         name="Sleep"
         component={SleepScreen}
-        options={{ tabBarIcon: ({ focused }) => <TabIcon emoji="🌙" label="Sleep" focused={focused} /> }}
+        options={{ tabBarIcon: ({ focused }) => <TabLabel label="Sleep" focused={focused} /> }}
       />
       <Tab.Screen
         name="Settings"
         component={SettingsScreen}
-        options={{ tabBarIcon: ({ focused }) => <TabIcon emoji="⚙️" label="Settings" focused={focused} /> }}
+        options={{ tabBarIcon: ({ focused }) => <TabLabel label="Settings" focused={focused} /> }}
       />
     </Tab.Navigator>
   );

@@ -73,7 +73,8 @@ function TrendSection({
   color: string;
 }) {
   const { width } = useWindowDimensions();
-  const chartWidth = width - 48;
+  // content padding 16+16, section padding 16+16
+  const chartWidth = width - 64;
   // rows are newest-first; reverse for chart (left=oldest, right=today)
   const ordered = [...rows].reverse();
   const data = ordered.map(getValue);
