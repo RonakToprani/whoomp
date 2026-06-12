@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { WhoopClient, ClientState } from './WhoopClient';
 import { insertSample, rollupAllDays, getRecentRrIntervals } from '../storage/db';
-import { analyzeHrv } from '../metrics/hrv';
+import { analyzeHrv, rangeFilter, median } from '../metrics/hrv';
 import { caloriesFromHrSeries } from '../metrics/zones';
 import { getProfile, type UserProfile } from '../storage/settings';
 
@@ -44,13 +44,21 @@ export function useBLE() {
           });
 
           if (heartRateBpm != null) {
-            // Displayed HR = median of the last 3 raw readings. The strap's PPG beat detection
-            // jitters when wrist contact is imperfect (lone spikes like 87→103→87); a median-of-3
-            // rejects those single-sample spikes without lagging genuine HR changes. The raw value
-            // is still stored below for fidelity.
+            // The strap's PPG HR byte momentarily spikes (e.g. 62→104→61) when wrist contact is
+            // imperfect — the "random ~100". Two defenses before display:
+            //  1. Cross-check against beat-to-beat timing in the SAME packet: with ≥2 R-R intervals,
+            //     60000/median(RR) is an independent HR estimate; when the byte disagrees by >25 bpm
+            //     it's a PPG artifact, so prefer the RR-derived value.
+            //  2. median-of-5 over recent readings rejects residual single/double spikes without
+            //     lagging a genuine change (which persists ≥3 samples).
+            // The raw byte is still stored below for fidelity.
+            const rrClean = rangeFilter(rrIntervalsMs);
+            const rrHr = rrClean.length >= 2 ? Math.round(60000 / median(rrClean)) : null;
+            const candidate = (rrHr != null && rrHr >= 30 && rrHr <= 220 && Math.abs(heartRateBpm - rrHr) > 25)
+              ? rrHr : heartRateBpm;
             const r = hrRecentRef.current;
-            r.push(heartRateBpm);
-            if (r.length > 3) r.shift();
+            r.push(candidate);
+            if (r.length > 5) r.shift();
             const shownHr = [...r].sort((a, b) => a - b)[r.length >> 1];
             setHeartRate(shownHr);
             setHrBuffer60(prev => [...prev.slice(-(HR_BUFFER - 1)), shownHr]);

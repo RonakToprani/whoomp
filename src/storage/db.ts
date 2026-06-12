@@ -2,7 +2,7 @@ import * as SQLite from 'expo-sqlite';
 import { strainScore, tanakaHRmax } from '../metrics/strain';
 import { recoveryBreakdown } from '../metrics/recovery';
 import { foldHistory, hrvCfg, restingHrCfg, respCfg } from '../metrics/baselines';
-import { analyzeNight, stageTotals, type HRSample, type RRInterval, type RespSample, type GravitySample } from '../metrics/sleep';
+import { analyzeNightSummary, type HRSample, type RRInterval, type RespSample, type GravitySample } from '../metrics/sleep';
 import { caloriesFromHrSeries } from '../metrics/zones';
 import { getProfile, type UserProfile } from './settings';
 
@@ -118,6 +118,15 @@ export async function getDb(): Promise<SQLite.SQLiteDatabase> {
     // the corrected cleaning.
     await _db.execAsync('DELETE FROM daily');
     await _db.execAsync('INSERT OR IGNORE INTO schema_version (v) VALUES (5)');
+  }
+
+  if (version < 6) {
+    // v5 rolled up only the single longest in-bed run per night (undercounting fragmented nights)
+    // and derived respiration from the raw ADC channel (which yields no rate → "--"). The engine now
+    // aggregates the WHOLE night across all sessions and derives respiration from R-R (RSA). Rebuild
+    // the derived daily table from the preserved samples so every past night reflects both fixes.
+    await _db.execAsync('DELETE FROM daily');
+    await _db.execAsync('INSERT OR IGNORE INTO schema_version (v) VALUES (6)');
   }
 
   return _db;
@@ -308,22 +317,22 @@ export async function rollupDay(dateStr?: string, profileArg?: UserProfile): Pro
   if (dayRows.length === 0 && nightRows.length === 0) return; // nothing to roll up
 
   const tzOffsetSeconds = -new Date(startUnix * 1000).getTimezoneOffset() * 60;
-  const session = hrN.length >= 10 || gravN.length >= 120
-    ? analyzeNight({ hr: hrN, rr: rrN, resp: respN, gravity: gravN, tzOffsetSeconds })
+  // Aggregate the WHOLE night (all in-bed runs), not just the longest — a fragmented night
+  // (bathroom trip / restless stretch / data gap) otherwise reports only one chunk.
+  const night = hrN.length >= 10 || gravN.length >= 120
+    ? analyzeNightSummary({ hr: hrN, rr: rrN, resp: respN, gravity: gravN, tzOffsetSeconds })
     : null;
 
-  const nightlyHrv = session?.avgHRV ?? null;
-  const nightlyRhr = session?.restingHR ?? null;
-  const nightlyResp = session?.respRate ?? null;
-  const sleepEff = session?.efficiency ?? null;
+  const nightlyHrv = night?.avgHRV ?? null;
+  const nightlyRhr = night?.restingHR ?? null;
+  const nightlyResp = night?.respRate ?? null;
+  const sleepEff = night?.efficiency ?? null;
 
   let sleep_minutes: number | null = null;
   let deep_min: number | null = null, rem_min: number | null = null, light_min: number | null = null, awake_min: number | null = null;
-  if (session) {
-    const totals = stageTotals(session.stages);
-    deep_min = totals.deep; rem_min = totals.rem; light_min = totals.light; awake_min = totals.wake;
-    const asleep = totals.deep + totals.rem + totals.light;
-    sleep_minutes = asleep > 0 ? asleep : Math.round((session.end - session.start) / 60);
+  if (night) {
+    deep_min = night.deepMin; rem_min = night.remMin; light_min = night.lightMin; awake_min = night.wakeMin;
+    sleep_minutes = night.asleepMin > 0 ? night.asleepMin : Math.round((night.end - night.start) / 60);
   }
 
   // ── Personalized HRmax: observed 99.5th-pct over the trailing 30 days, else Tanaka (≈191 @ age 24) ──
@@ -363,7 +372,7 @@ export async function rollupDay(dateStr?: string, profileArg?: UserProfile): Pro
     hrv_baseline: hrvBaseline.baseline, hrv_spread: hrvBaseline.spread,
     rhr_baseline: rhrBaseline.baseline, rhr_spread: rhrBaseline.spread,
     recovery_state: hrvBaseline.status,
-    sleep_stages: session ? JSON.stringify(session.stages) : null,
+    sleep_stages: night ? JSON.stringify(night.stages) : null,
   });
 }
 

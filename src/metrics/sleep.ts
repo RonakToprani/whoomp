@@ -399,6 +399,95 @@ function respRateAndRRV(respRaw: number[], dtS = 1): [number, number] {
   return [60 / median(intervals), stdevPop(intervals)];
 }
 
+// ── Respiration rate from R-R (RSA) ──
+// WHOOP stores a raw respiration ADC, but it is "resp rate computed server-side" — not a clean
+// countable breathing waveform, so the raw-channel peak counter (respRateFromRaw) returns null in
+// practice (the live "--"). The robust on-device path, shipped by NOOP, recovers the breathing rate
+// from respiratory sinus arrhythmia (RSA): breathing modulates beat-to-beat timing, so the R-R
+// tachogram oscillates at the breathing frequency. Faithful port of NOOP SleepStager.respRateFromRR.
+const RSA_RESAMPLE_HZ = 4.0;          // standard HRV resample grid
+const RSA_DETREND_WINDOW_S = 8.0;     // moving-mean detrend window
+const RSA_MIN_PEAK_DISTANCE_S = 2.5;  // ≤24 bpm
+const RSA_WINDOW_S = 300.0;           // per-window estimate length (5 min)
+const RSA_MIN_BREATH_INTERVAL_S = 2.5; // 24 bpm
+const RSA_MAX_BREATH_INTERVAL_S = 10.0; // 6 bpm
+// Canonical plausible sleeping respiratory band (bpm); estimates outside → null (honest no-data).
+export const RESP_RSA_MIN_BPM = 8.0;
+export const RESP_RSA_MAX_BPM = 25.0;
+
+/**
+ * APPROXIMATE respiratory rate (breaths/min) from the R-R interval stream over an in-bed session
+ * via respiratory sinus arrhythmia. An on-device ESTIMATE (tracks but does not equal a chest-band
+ * rate); null when too few intervals survive or the result is outside the plausible band.
+ */
+export function respRateFromRR(rr: RRInterval[], start: number, end: number): number | null {
+  if (end <= start) return null;
+  // 1. In-bed R-R in chronological order, range-filtered (drop dropouts/ectopics).
+  const inBed = rr.filter(r => r.ts >= start && r.ts <= end).sort((a, b) => a.ts - b.ts).map(r => r.rrMs);
+  const filtered = rangeFilter(inBed);
+  if (filtered.length < 30) return null;
+
+  // 2. Beat times (s from session start) via cumulative sum of kept intervals.
+  const beatTimes = new Array<number>(filtered.length);
+  let acc = 0;
+  for (let i = 0; i < filtered.length; i++) { acc += filtered[i] / 1000; beatTimes[i] = acc; }
+  const totalSpanS = beatTimes[beatTimes.length - 1];
+  if (totalSpanS < RSA_WINDOW_S / 2) return null;
+
+  // 3. Resample the tachogram onto a uniform 4 Hz grid (linear interpolation).
+  const dt = 1 / RSA_RESAMPLE_HZ;
+  const nGrid = Math.floor(totalSpanS / dt) + 1;
+  if (nGrid < 8) return null;
+  const grid = new Array<number>(nGrid);
+  let seg = 0;
+  for (let g = 0; g < nGrid; g++) {
+    const t = g * dt;
+    while (seg < beatTimes.length - 2 && beatTimes[seg + 1] < t) seg++;
+    const t0 = beatTimes[seg], t1 = beatTimes[seg + 1];
+    const v0 = filtered[seg], v1 = filtered[seg + 1];
+    grid[g] = t1 <= t0 ? v0 : v0 + Math.min(Math.max((t - t0) / (t1 - t0), 0), 1) * (v1 - v0);
+  }
+
+  // 4. Detrend: subtract a centered moving mean (removes slow LF/baseline drift).
+  const halfW = Math.max(1, Math.round(RSA_DETREND_WINDOW_S * RSA_RESAMPLE_HZ / 2));
+  const detrended = new Array<number>(nGrid);
+  for (let i = 0; i < nGrid; i++) {
+    const lo = Math.max(0, i - halfW), hi = Math.min(nGrid - 1, i + halfW);
+    let sum = 0;
+    for (let j = lo; j <= hi; j++) sum += grid[j];
+    detrended[i] = grid[i] - sum / (hi - lo + 1);
+  }
+  if (stdevPop(detrended) <= 1e-9) return null; // flat → no RSA
+
+  // 5. Per ~5-min window: peak-pick → 60/median(breath interval); median across windows.
+  const minDistSamples = Math.max(2, Math.round(RSA_MIN_PEAK_DISTANCE_S * RSA_RESAMPLE_HZ));
+  const windowSamples = Math.max(minDistSamples * 3, Math.round(RSA_WINDOW_S * RSA_RESAMPLE_HZ));
+  const perWindowRates: number[] = [];
+  let w = 0;
+  while (w < nGrid) {
+    const wEnd = Math.min(nGrid, w + windowSamples);
+    if (wEnd - w >= minDistSamples * 3) {
+      const winSeg = detrended.slice(w, wEnd);
+      const peaks = findPeaks(winSeg, minDistSamples, 0);
+      if (peaks.length >= 3) {
+        const intervals: number[] = [];
+        for (let i = 1; i < peaks.length; i++) {
+          const ivS = (peaks[i] - peaks[i - 1]) * dt;
+          if (ivS >= RSA_MIN_BREATH_INTERVAL_S && ivS <= RSA_MAX_BREATH_INTERVAL_S) intervals.push(ivS);
+        }
+        if (intervals.length >= 2) {
+          const med = median(intervals);
+          if (med > 0) perWindowRates.push(60 / med);
+        }
+      }
+    }
+    w += windowSamples;
+  }
+  if (!perWindowRates.length) return null;
+  const m = median(perWindowRates);
+  return (m >= RESP_RSA_MIN_BPM && m <= RESP_RSA_MAX_BPM) ? Math.round(m * 10) / 10 : null;
+}
+
 // ── Per-epoch features + classifier ──
 interface EpochFeatures {
   index: number; count: number; moveFrac: number; ckSleep: boolean;
@@ -692,6 +781,86 @@ export function analyzeNight(input: DetectSleepInput): SleepSession | null {
   const sessions = useGravity ? detectSleep(input) : detectSleepHrOnly(input.hr ?? [], input.rr ?? []);
   if (!sessions.length) return null;
   return sessions.reduce((best, s) => (s.end - s.start > best.end - best.start ? s : best));
+}
+
+/** Aggregated whole-night summary across ALL detected sessions (not just the longest). */
+export interface NightSummary {
+  start: number; // earliest session start
+  end: number;   // latest session end
+  sessions: SleepSession[];
+  stages: StageSegment[]; // every session's segments, concatenated in time order (for the hypnogram)
+  asleepMin: number; // total sleep time (deep + rem + light) summed across sessions
+  deepMin: number;
+  remMin: number;
+  lightMin: number;
+  wakeMin: number;
+  efficiency: number;       // in-bed-weighted mean efficiency
+  restingHR: number | null; // lowest resting HR across sessions
+  avgHRV: number | null;    // in-bed-weighted mean HRV
+  respRate: number | null;  // median of per-session RSA estimates
+}
+
+/**
+ * Combine detected sessions into one night, mirroring NOOP's AnalyticsEngine.analyzeDay: a real
+ * night frequently fragments into several in-bed runs (a bathroom trip, a restless stretch, or a
+ * BLE/data gap > maxGapMin all split the gravity-stillness spine). Reporting only the single
+ * longest run — as the old analyzeNight consumer did — undercounts a 7 h night to whichever chunk
+ * happened to be longest (~3 h). Here we sum the time asleep across every run instead.
+ */
+export function summarizeNight(sessions: SleepSession[], rr: RRInterval[] = []): NightSummary | null {
+  if (!sessions.length) return null;
+  const sorted = sessions.slice().sort((a, b) => a.start - b.start);
+
+  let deepS = 0, remS = 0, lightS = 0, wakeS = 0, inBedS = 0, effWeighted = 0;
+  const stages: StageSegment[] = [];
+  for (const s of sorted) {
+    for (const seg of s.stages) {
+      const dur = seg.end - seg.start;
+      if (seg.stage === 'deep') deepS += dur;
+      else if (seg.stage === 'rem') remS += dur;
+      else if (seg.stage === 'light') lightS += dur;
+      else wakeS += dur;
+    }
+    const inBed = s.end - s.start;
+    inBedS += inBed;
+    effWeighted += s.efficiency * inBed;
+    stages.push(...s.stages);
+  }
+
+  const restingHRs = sorted.map(s => s.restingHR).filter((x): x is number => x != null);
+  const restingHR = restingHRs.length ? Math.min(...restingHRs) : null;
+
+  const hrvPairs = sorted
+    .filter(s => s.avgHRV != null)
+    .map(s => [s.avgHRV as number, s.end - s.start] as const);
+  const hrvWeight = hrvPairs.reduce((a, [, w]) => a + w, 0);
+  const avgHRV = hrvWeight > 0 ? hrvPairs.reduce((a, [v, w]) => a + v * w, 0) / hrvWeight : null;
+
+  const resps = sorted.map(s => respRateFromRR(rr, s.start, s.end)).filter((x): x is number => x != null);
+  const respRate = resps.length ? Math.round(median(resps) * 10) / 10 : null;
+
+  return {
+    start: sorted[0].start,
+    end: sorted[sorted.length - 1].end,
+    sessions: sorted,
+    stages,
+    asleepMin: Math.round((deepS + remS + lightS) / 60),
+    deepMin: Math.round(deepS / 60),
+    remMin: Math.round(remS / 60),
+    lightMin: Math.round(lightS / 60),
+    wakeMin: Math.round(wakeS / 60),
+    efficiency: inBedS > 0 ? effWeighted / inBedS : 0,
+    restingHR,
+    avgHRV,
+    respRate,
+  };
+}
+
+/** Detect + aggregate the whole night into one summary (the value the dashboard rolls up). */
+export function analyzeNightSummary(input: DetectSleepInput): NightSummary | null {
+  const useGravity = input.gravity.length >= 120;
+  const sessions = useGravity ? detectSleep(input) : detectSleepHrOnly(input.hr ?? [], input.rr ?? []);
+  return summarizeNight(sessions, input.rr ?? []);
 }
 
 export function sleepPerformance(asleepMinutes: number, needMinutes: number): number {
