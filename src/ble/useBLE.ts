@@ -32,7 +32,7 @@ export function useBLE() {
   const hrTodayRef = useRef<number[]>([]);
 
   useEffect(() => {
-    getAge().then(age => rollupAllDays(age)).catch(() => {});
+    rollupAllDays().catch(() => {});
 
     const client = new WhoopClient();
     clientRef.current = client;
@@ -82,7 +82,7 @@ export function useBLE() {
       ),
 
       client.on<{ samples: number }>('historyComplete', () => {
-        getAge().then(age => rollupAllDays(age)).catch(() => {});
+        rollupAllDays().catch(() => {});
       }),
 
       client.on<number>('battery', setBattery),
@@ -94,6 +94,9 @@ export function useBLE() {
   useEffect(() => {
     if (state !== 'connected') return;
     setSessionStartUnix(Math.floor(Date.now() / 1000));
+    // New session → reset the in-session calorie counter.
+    hrTodayRef.current = [];
+    setCalories(0);
     const sinceUnix = Math.floor(Date.now() / 1000) - 300;
     getRecentRrIntervals(sinceUnix).then(intervals => {
       if (intervals.length >= 5) {
@@ -101,6 +104,12 @@ export function useBLE() {
         setHrv(rmssd(filterRr(intervals)));
       }
     }).catch(() => {});
+
+    // Re-roll daily aggregates while connected so live samples persist into the
+    // tables the dashboard reads (Home / Trends / Sleep) without needing a
+    // reconnect or app restart.
+    const rollupTimer = setInterval(() => { rollupAllDays().catch(() => {}); }, 120_000);
+    return () => clearInterval(rollupTimer);
   }, [state]);
 
   const scan = useCallback(() => clientRef.current?.scan(), []);

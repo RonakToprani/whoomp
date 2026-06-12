@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, TextInput, Share, Alert } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, TextInput, Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as FileSystem from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
 import { useBleContext } from '../ble/BleContext';
-import { getDailyHistory, getSampleCount } from '../storage/db';
+import { getDailyHistory, getSampleCount, getAllSamples } from '../storage/db';
 
 const AGE_KEY = '@whoomp/age';
 const WRIST_KEY = '@whoomp/wrist';
@@ -29,18 +31,61 @@ export default function SettingsScreen() {
     AsyncStorage.setItem(WRIST_KEY, val).catch(() => {});
   };
 
-  const exportData = async () => {
+  const [exporting, setExporting] = useState(false);
+
+  const writeAndShare = async (filename: string, csv: string) => {
+    const dir = FileSystem.cacheDirectory;
+    if (!dir) throw new Error('no cache directory');
+    const uri = dir + filename;
+    await FileSystem.writeAsStringAsync(uri, csv, { encoding: FileSystem.EncodingType.UTF8 });
+    if (!(await Sharing.isAvailableAsync())) {
+      Alert.alert('Sharing is not available on this device');
+      return;
+    }
+    await Sharing.shareAsync(uri, {
+      mimeType: 'text/csv',
+      UTI: 'public.comma-separated-values-text',
+      dialogTitle: 'Whoomp data export',
+    });
+  };
+
+  const exportDaily = async () => {
+    setExporting(true);
     try {
       const rows = await getDailyHistory(30);
       const csv = [
-        'date,rmssd_ms,resting_hr_bpm,strain,recovery_pct',
+        'date,rmssd_ms,resting_hr_bpm,strain,recovery_pct,calories_kcal,sleep_minutes',
         ...rows.map(r =>
-          [r.date, r.rmssd ?? '', r.rhr ?? '', r.strain ?? '', r.recovery ?? ''].join(',')
+          [r.date, r.rmssd ?? '', r.rhr ?? '', r.strain ?? '', r.recovery ?? '', r.calories ?? '', r.sleep_minutes ?? ''].join(',')
         ),
       ].join('\n');
-      await Share.share({ title: 'Whoomp Data Export', message: csv });
+      await writeAndShare('whoomp-daily.csv', csv);
     } catch {
       Alert.alert('Export failed');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const exportSamples = async () => {
+    setExporting(true);
+    try {
+      const rows = await getAllSamples();
+      const csv = [
+        'unix,iso_utc,hr_bpm,rr_intervals_ms,source',
+        ...rows.map(r => [
+          r.unix,
+          new Date(r.unix * 1000).toISOString(),
+          r.hr ?? '',
+          r.rr_json ? (JSON.parse(r.rr_json) as number[]).join('|') : '',
+          r.source ?? '',
+        ].join(',')),
+      ].join('\n');
+      await writeAndShare('whoomp-samples.csv', csv);
+    } catch {
+      Alert.alert('Export failed');
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -97,8 +142,19 @@ export default function SettingsScreen() {
         {sampleCount != null && (
           <Text style={styles.dataLine}>{sampleCount.toLocaleString()} samples stored</Text>
         )}
-        <TouchableOpacity style={[styles.outlineBtn, { marginTop: 12 }]} onPress={exportData}>
-          <Text style={styles.outlineBtnText}>Export last 30 days (CSV)</Text>
+        <TouchableOpacity
+          style={[styles.outlineBtn, { marginTop: 12 }, exporting && styles.btnDisabled]}
+          onPress={exportSamples}
+          disabled={exporting}
+        >
+          <Text style={styles.outlineBtnText}>{exporting ? 'Exporting…' : 'Export all samples (CSV)'}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.outlineBtn, { marginTop: 10 }, exporting && styles.btnDisabled]}
+          onPress={exportDaily}
+          disabled={exporting}
+        >
+          <Text style={styles.outlineBtnText}>Export daily summary (CSV)</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -132,5 +188,6 @@ const styles = StyleSheet.create({
     borderRadius: 10, alignSelf: 'flex-start',
   },
   outlineBtnText: { fontSize: 14, color: '#888' },
+  btnDisabled: { opacity: 0.4 },
   dataLine: { fontSize: 14, color: '#555' },
 });

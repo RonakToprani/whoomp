@@ -79,7 +79,9 @@ export class WhoopClient {
   private _emitter = new Emitter();
   private _device: Device | null = null;
   private _connected = false;
+  private _connecting = false;
   private _reconnectBackoff = RECONNECT_INITIAL_MS;
+  private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private _intentionalDisconnect = false;
   private _seq = 0;
   private _batteryPollInterval: ReturnType<typeof setInterval> | null = null;
@@ -107,8 +109,30 @@ export class WhoopClient {
     this._emit('state', s);
   }
 
+  private _clearReconnectTimer(): void {
+    if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+  }
+
+  private _scheduleReconnect(): void {
+    if (this._intentionalDisconnect) return;
+    this._clearReconnectTimer();               // never stack reconnect chains
+    this._setState('reconnecting');
+    this._reconnectTimer = setTimeout(() => this._tryReconnect(), this._reconnectBackoff);
+    this._reconnectBackoff = Math.min(this._reconnectBackoff * 2, RECONNECT_MAX_MS);
+  }
+
+  // Remove every per-connection subscription and timer. Safe to call repeatedly,
+  // so a reconnect can never leave a previous connection's handlers attached.
+  private _teardownConnection(): void {
+    this._subs.forEach(s => { try { s.remove(); } catch {} });
+    this._subs = [];
+    if (this._batteryPollInterval) { clearInterval(this._batteryPollInterval); this._batteryPollInterval = null; }
+  }
+
   async scan(): Promise<void> {
     this._intentionalDisconnect = false;
+    this._clearReconnectTimer();
+    this._reconnectBackoff = RECONNECT_INITIAL_MS;
     this._setState('connecting');
     manager.startDeviceScan([SERVICES.WHOOP], null, (error, device) => {
       if (error) { this._emit('error', error); return; }
@@ -126,16 +150,26 @@ export class WhoopClient {
 
   private async _connect(): Promise<void> {
     if (!this._device) return;
+    if (this._connecting) return;            // no overlapping connect attempts
+    this._connecting = true;
+    this._clearReconnectTimer();
+    this._teardownConnection();              // drop any stale handlers/timers first
     this._setState('connecting');
 
-    const connected = await this._device.connect();
-    this._device = connected;
-    await connected.discoverAllServicesAndCharacteristics();
+    let connected: Device;
+    try {
+      connected = await this._device.connect();
+      this._device = connected;
+      await connected.discoverAllServicesAndCharacteristics();
+    } catch (err) {
+      this._connecting = false;
+      throw err;
+    }
 
     this._connected = true;
     this._reconnectBackoff = RECONNECT_INITIAL_MS;
 
-    connected.onDisconnected((_error, _d) => this._onDisconnected());
+    const discSub = connected.onDisconnected((_error, _d) => this._onDisconnected());
 
     const dataSub = connected.monitorCharacteristicForService(
       SERVICES.WHOOP,
@@ -237,11 +271,12 @@ export class WhoopClient {
       }
     );
 
-    this._subs = [dataSub, respSub, eventSub];
+    this._subs = [discSub, dataSub, respSub, eventSub];
     this._setState('connected');
 
     this._postConnectFlow().catch(err => this._emit('error', err));
     this._batteryPollInterval = setInterval(() => this.getBatteryLevel(), BATTERY_POLL_MS);
+    this._connecting = false;
   }
 
   private async _postConnectFlow(): Promise<void> {
@@ -264,13 +299,10 @@ export class WhoopClient {
 
   async disconnect(): Promise<void> {
     this._intentionalDisconnect = true;
-    if (this._batteryPollInterval) {
-      clearInterval(this._batteryPollInterval);
-      this._batteryPollInterval = null;
-    }
+    this._clearReconnectTimer();
+    this._connecting = false;
     try { await this.stopRealtime(); } catch {}
-    this._subs.forEach(s => s.remove());
-    this._subs = [];
+    this._teardownConnection();
     if (this._device) {
       try { await this._device.cancelConnection(); } catch {}
     }
@@ -280,12 +312,9 @@ export class WhoopClient {
 
   destroy(): void {
     this._intentionalDisconnect = true;
-    this._subs.forEach(s => s.remove());
-    this._subs = [];
-    if (this._batteryPollInterval) {
-      clearInterval(this._batteryPollInterval);
-      this._batteryPollInterval = null;
-    }
+    this._clearReconnectTimer();
+    this._connecting = false;
+    this._teardownConnection();
     if (this._device) {
       this._device.cancelConnection().catch(() => {});
     }
@@ -293,28 +322,23 @@ export class WhoopClient {
 
   private _onDisconnected(): void {
     this._connected = false;
-    if (this._batteryPollInterval) {
-      clearInterval(this._batteryPollInterval);
-      this._batteryPollInterval = null;
-    }
+    this._connecting = false;
+    this._teardownConnection();
     this._metaQueue.clear();
     if (this._historicalDumpInFlight) {
       this._emit('historyError', new Error('disconnected during dump'));
       this._historicalDumpInFlight = false;
     }
-    if (this._intentionalDisconnect) return;
-    this._setState('reconnecting');
-    setTimeout(() => this._tryReconnect(), this._reconnectBackoff);
-    this._reconnectBackoff = Math.min(this._reconnectBackoff * 2, RECONNECT_MAX_MS);
+    this._scheduleReconnect();               // no-ops if the disconnect was intentional
   }
 
   private async _tryReconnect(): Promise<void> {
+    this._reconnectTimer = null;             // the scheduled fire has consumed the timer
+    if (this._intentionalDisconnect) return;
     try { await this._connect(); }
     catch (err) {
-      this._setState('reconnecting');
       this._emit('error', err);
-      setTimeout(() => this._tryReconnect(), this._reconnectBackoff);
-      this._reconnectBackoff = Math.min(this._reconnectBackoff * 2, RECONNECT_MAX_MS);
+      this._scheduleReconnect();
     }
   }
 

@@ -5,7 +5,11 @@ import RecoveryRing from '../components/RecoveryRing';
 import MetricCard from '../components/MetricCard';
 import HRChart from '../components/HRChart';
 import { useBleContext } from '../ble/BleContext';
-import { getDailyHistory, DailyRow } from '../storage/db';
+import { getDailyHistory, rollupAllDays, DailyRow } from '../storage/db';
+
+function localDateStr(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
 
 export default function HomeScreen() {
   const { heartRate, hrv, state, calories, hrBuffer60 } = useBleContext();
@@ -15,22 +19,39 @@ export default function HomeScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const { width } = useWindowDimensions();
 
+  // Steps: re-query the midnight→now total directly. watchStepCount() reports
+  // steps since the subscription started (not since midnight), which is what
+  // made the count collapse to small random values — so we don't use it.
   useEffect(() => {
-    let sub: { remove: () => void } | null = null;
-    Pedometer.isAvailableAsync().then(ok => {
-      if (!ok) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const queryToday = () => {
       const start = new Date();
       start.setHours(0, 0, 0, 0);
-      Pedometer.getStepCountAsync(start, new Date()).then(r => setSteps(r.steps)).catch(() => {});
-      sub = Pedometer.watchStepCount(r => setSteps(r.steps));
+      Pedometer.getStepCountAsync(start, new Date())
+        .then(r => { if (!cancelled) setSteps(r.steps); })
+        .catch(() => {});
+    };
+
+    Pedometer.isAvailableAsync().then(ok => {
+      if (!ok || cancelled) return;
+      queryToday();
+      timer = setInterval(queryToday, 60_000);
     }).catch(() => {});
-    return () => { sub?.remove(); };
+
+    const appSub = AppState.addEventListener('change', s => { if (s === 'active') queryToday(); });
+
+    return () => { cancelled = true; if (timer) clearInterval(timer); appSub.remove(); };
   }, []);
 
   const refresh = useCallback(async () => {
     try {
+      // Rebuild today's aggregates from raw samples before reading them back,
+      // so the dashboard reflects data that arrived since the last roll-up.
+      await rollupAllDays();
       const rows = await getDailyHistory(2);
-      const todayStr = new Date().toISOString().slice(0, 10);
+      const todayStr = localDateStr(new Date());
       setToday(rows.find(r => r.date === todayStr) ?? null);
       setYesterday(rows.find(r => r.date !== todayStr) ?? null);
     } catch {}
@@ -45,7 +66,8 @@ export default function HomeScreen() {
   useEffect(() => {
     refresh();
     const sub = AppState.addEventListener('change', s => { if (s === 'active') refresh(); });
-    return () => sub.remove();
+    const timer = setInterval(refresh, 60_000);
+    return () => { sub.remove(); clearInterval(timer); };
   }, [refresh]);
 
   useEffect(() => { refresh(); }, [state, refresh]);
@@ -57,6 +79,8 @@ export default function HomeScreen() {
   const recovery = featured?.recovery ?? null;
   const strain = featured?.strain ?? null;
   const rhr = featured?.rhr ?? null;
+  // Day total from the roll-up; fall back to the live in-session counter.
+  const displayCalories = featured?.calories ?? (calories > 0 ? calories : null);
 
   // content padding 16+16, chartBox margin 6+6, chartBox padding 16+16
   const chartWidth = width - 76;
@@ -89,7 +113,7 @@ export default function HomeScreen() {
       </View>
 
       <View style={styles.row}>
-        <MetricCard label="CALORIES" value={calories > 0 ? Math.round(calories) : null} unit="kcal" />
+        <MetricCard label="CALORIES" value={displayCalories != null ? Math.round(displayCalories) : null} unit="kcal" />
         <MetricCard label="STEPS" value={steps != null ? steps.toLocaleString() : null} unit="today" />
       </View>
 

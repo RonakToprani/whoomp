@@ -49,45 +49,62 @@ function pstdev(values: number[]): number {
   return Math.sqrt(sq / values.length);
 }
 
+// Bridge arousals / sparse overnight logging up to this many minutes so a
+// real night stays one span instead of fragmenting into sub-blocks.
+export const BRIDGE_MINUTES = 30;
+
 export function detectSleepWindow(samples: SampleRow[], _nightOf: string): [Date, Date] | null {
   if (!samples || samples.length === 0) return null;
-  const hrs: number[] = [];
-  for (const r of samples) { if (r.heart_rate_bpm != null) hrs.push(r.heart_rate_bpm); }
-  if (hrs.length === 0) return null;
-  const hrMin = Math.min(...hrs);
-  const hrThreshold = Math.max(mean(hrs) * 0.95, hrMin + 25);
-  const motionThreshold = 180;
-  const gapTolerance = 6;
-  const runs: SampleRow[][] = [];
-  let cur: SampleRow[] = [];
-  let gap = 0;
+
+  // (time, hr) for every sample that carries a usable HR.
+  const pts: { t: number; hr: number }[] = [];
   for (const r of samples) {
-    const hr = r.heart_rate_bpm != null ? r.heart_rate_bpm : 999;
-    const isSleeping = hr < hrThreshold && motionMagnitude(r) < motionThreshold;
-    if (isSleeping) { cur.push(r); gap = 0; }
-    else if (cur.length > 0) {
-      gap += 1;
-      if (gap > gapTolerance) { runs.push(cur); cur = []; gap = 0; }
-      else cur.push(r);
+    if (r.heart_rate_bpm != null) {
+      const t = parseTs(r).getTime();
+      if (Number.isFinite(t)) pts.push({ t, hr: r.heart_rate_bpm });
     }
   }
-  if (cur.length > 0) runs.push(cur);
-  let best: [Date, Date, number] | null = null;
+  if (pts.length < 10) return null;
+  pts.sort((a, b) => a.t - b.t);
+
+  // Robust asleep threshold: low percentile of HR + headroom for light/REM
+  // elevation. Percentile (not mean) so a few high samples can't drag it up.
+  const sortedHr = pts.map(p => p.hr).sort((a, b) => a - b);
+  const robustMin = sortedHr[Math.floor(sortedHr.length * 0.05)];
+  const threshold = Math.min(95, robustMin + 20);
+
+  // Timestamps that look asleep, merged into spans by TIME — a gap (arousal or
+  // missing data) up to BRIDGE_MINUTES stays inside the same span.
+  const bridgeMs = BRIDGE_MINUTES * 60_000;
+  const asleep = pts.filter(p => p.hr <= threshold).map(p => p.t);
+  if (asleep.length === 0) return null;
+
+  const spans: [number, number][] = [];
+  let spanStart = asleep[0];
+  let spanEnd = asleep[0];
+  for (let i = 1; i < asleep.length; i++) {
+    if (asleep[i] - spanEnd <= bridgeMs) {
+      spanEnd = asleep[i];
+    } else {
+      spans.push([spanStart, spanEnd]);
+      spanStart = asleep[i];
+      spanEnd = asleep[i];
+    }
+  }
+  spans.push([spanStart, spanEnd]);
+
+  // Longest span that clears the minimum block and is centred in the night.
   const { startHour: nightStartH, endHour: nightEndH } = NIGHT_WINDOW_LOCAL;
-  for (const run of runs) {
-    const start = parseTs(run[0]);
-    const end = parseTs(run[run.length - 1]);
-    const durationMin = (end.getTime() - start.getTime()) / 60_000;
-    if (durationMin < MIN_SLEEP_BLOCK_MINUTES) continue;
-    const mid = new Date(start.getTime() + (end.getTime() - start.getTime()) / 2);
-    const h = mid.getHours();
-    const inWindow = h >= nightStartH || h < nightEndH;
+  let best: [number, number] | null = null;
+  for (const [s, e] of spans) {
+    if ((e - s) / 60_000 < MIN_SLEEP_BLOCK_MINUTES) continue;
+    const midH = new Date(s + (e - s) / 2).getHours();
+    const inWindow = midH >= nightStartH || midH < nightEndH;
     if (!inWindow) continue;
-    const score = Math.trunc(durationMin);
-    if (best === null || score > best[2]) best = [start, end, score];
+    if (best === null || (e - s) > (best[1] - best[0])) best = [s, e];
   }
   if (best === null) return null;
-  return [best[0], best[1]];
+  return [new Date(best[0]), new Date(best[1])];
 }
 
 function bucketIntoEpochs(samples: SampleRow[], start: Date, end: Date): SampleRow[][] {
@@ -132,14 +149,20 @@ export function classifyStages(samples: SampleRow[], window: [Date, Date]): Stag
   const hrVals = epochStats.filter(e => e.hr != null).map(e => e.hr as number);
   const rmssdVals = epochStats.filter(e => e.rmssd != null).map(e => e.rmssd as number);
   if (hrVals.length === 0) return [];
-  const hrMin = Math.min(...hrVals);
+  // Robust HR floor (5th percentile) so one stray low reading can't define "deep".
+  const sortedHr = [...hrVals].sort((a, b) => a - b);
+  const hrFloor = sortedHr[Math.floor(sortedHr.length * 0.05)];
   const hrBaseline = median(hrVals);
   const rmssdBaseline = rmssdVals.length > 0 ? median(rmssdVals) : 30.0;
-  const rawStages: Stage[] = epochStats.map(({ hr, motion, rmssd }) => {
+  // Physiology: deep (SWS) = lowest HR + highest HRV; REM = elevated HR + lower
+  // HRV; wake = clearly elevated HR; everything else is light. Movement would
+  // refine this, but the WHOOP BLE stream doesn't expose parsed accelerometer
+  // data — so staging here is HR + HRV only.
+  const rawStages: Stage[] = epochStats.map(({ hr, rmssd }) => {
     if (hr == null) return 'wake';
-    if ((motion != null && motion > 200) || hr > hrBaseline + 12) return 'wake';
-    if (motion != null && motion < 30 && hr <= hrMin + 5 && (rmssd == null || rmssd <= rmssdBaseline)) return 'deep';
-    if (motion != null && motion < 60 && hr >= hrMin + 6 && rmssd != null && rmssd > rmssdBaseline * 1.1) return 'rem';
+    if (hr > hrBaseline + 10) return 'wake';
+    if (hr <= hrFloor + 4 && (rmssd == null || rmssd >= rmssdBaseline)) return 'deep';
+    if (rmssd != null && rmssd < rmssdBaseline && hr >= hrFloor + 5) return 'rem';
     return 'light';
   });
   const smoothed = rawStages.slice();

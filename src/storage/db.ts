@@ -1,10 +1,24 @@
 import * as SQLite from 'expo-sqlite';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { rmssd, filterRr } from '../metrics/hrv';
 import { strainScore } from '../metrics/strain';
 import { recoveryScore } from '../metrics/recovery';
-import { detectSleepWindow } from '../metrics/sleep';
+import { detectSleepWindow, classifyStages, stageTotals } from '../metrics/sleep';
+import { caloriesFromHrSeries } from '../metrics/zones';
+
+const AGE_KEY = '@whoomp/age';
 
 let _db: SQLite.SQLiteDatabase | null = null;
+
+async function storedAge(): Promise<number> {
+  try {
+    const v = await AsyncStorage.getItem(AGE_KEY);
+    const n = v ? parseInt(v, 10) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : 30;
+  } catch {
+    return 30;
+  }
+}
 
 function localDateStr(d: Date): string {
   return [
@@ -67,6 +81,20 @@ export async function getDb(): Promise<SQLite.SQLiteDatabase> {
     `);
   }
 
+  if (version < 2) {
+    // Add calories column to daily rollup. ALTER fails if it already exists; ignore.
+    try { await _db.execAsync('ALTER TABLE daily ADD COLUMN calories REAL'); } catch {}
+    await _db.execAsync('INSERT OR IGNORE INTO schema_version (v) VALUES (2)');
+  }
+
+  if (version < 3) {
+    // Per-stage sleep minutes for the Sleep screen breakdown.
+    for (const col of ['deep_min', 'rem_min', 'light_min', 'awake_min']) {
+      try { await _db.execAsync(`ALTER TABLE daily ADD COLUMN ${col} INTEGER`); } catch {}
+    }
+    await _db.execAsync('INSERT OR IGNORE INTO schema_version (v) VALUES (3)');
+  }
+
   return _db;
 }
 
@@ -78,7 +106,13 @@ export interface SampleInsert {
   source: 'realtime' | 'historical';
 }
 
+const MIN_VALID_UNIX = 1577836800; // 2020-01-01
+
 export async function insertSample(s: SampleInsert): Promise<void> {
+  // Guard against corrupt timestamps (e.g. a strap whose RTC hasn't synced yet)
+  // landing in — and poisoning — the day buckets the dashboard rolls up.
+  const nowUnix = Math.floor(Date.now() / 1000);
+  if (!Number.isFinite(s.unix) || s.unix < MIN_VALID_UNIX || s.unix > nowUnix + 86400) return;
   const db = await getDb();
   await db.runAsync(
     'INSERT OR IGNORE INTO samples (unix, hr, rr_json, flash_index, source) VALUES (?, ?, ?, ?, ?)',
@@ -97,20 +131,31 @@ export interface DailyRow {
   strain: number | null;
   sleep_minutes: number | null;
   recovery: number | null;
+  calories: number | null;
+  deep_min: number | null;
+  rem_min: number | null;
+  light_min: number | null;
+  awake_min: number | null;
 }
 
 export async function upsertDaily(row: DailyRow): Promise<void> {
   const db = await getDb();
   await db.runAsync(
-    `INSERT INTO daily (date, rmssd, rhr, strain, sleep_minutes, recovery)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO daily (date, rmssd, rhr, strain, sleep_minutes, recovery, calories, deep_min, rem_min, light_min, awake_min)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(date) DO UPDATE SET
        rmssd = excluded.rmssd,
        rhr = excluded.rhr,
        strain = excluded.strain,
        sleep_minutes = excluded.sleep_minutes,
-       recovery = excluded.recovery`,
-    row.date, row.rmssd, row.rhr, row.strain, row.sleep_minutes, row.recovery,
+       recovery = excluded.recovery,
+       calories = excluded.calories,
+       deep_min = excluded.deep_min,
+       rem_min = excluded.rem_min,
+       light_min = excluded.light_min,
+       awake_min = excluded.awake_min`,
+    row.date, row.rmssd, row.rhr, row.strain, row.sleep_minutes, row.recovery, row.calories,
+    row.deep_min, row.rem_min, row.light_min, row.awake_min,
   );
 }
 
@@ -136,24 +181,28 @@ export async function getRecentRrIntervals(sinceUnix: number): Promise<number[]>
 }
 
 // Roll up one calendar day from raw samples → daily table.
-export async function rollupDay(dateStr?: string, age = 30): Promise<void> {
+export async function rollupDay(dateStr?: string, ageArg?: number): Promise<void> {
   const date = dateStr ?? localDateStr(new Date());
+  const age = ageArg ?? await storedAge();
   const startUnix = midnightUnix(date);
   const endUnix = startUnix + 86400;
 
   const db = await getDb();
-  const rows = await db.getAllAsync<{ hr: number | null; rr_json: string | null }>(
-    'SELECT hr, rr_json FROM samples WHERE unix >= ? AND unix < ? ORDER BY unix ASC',
+  const rows = await db.getAllAsync<{ unix: number; hr: number | null; rr_json: string | null }>(
+    'SELECT unix, hr, rr_json FROM samples WHERE unix >= ? AND unix < ? ORDER BY unix ASC',
     startUnix, endUnix,
   );
   if (rows.length === 0) return;
 
-  const hrSeries: number[] = [];
+  // Dedupe HR to one value per second so overlapping realtime + historical
+  // samples don't double-count toward strain / calories (both assume 1 Hz).
+  const hrBySecond = new Map<number, number>();
   const allRr: number[] = [];
   for (const row of rows) {
-    if (row.hr != null) hrSeries.push(row.hr);
+    if (row.hr != null) hrBySecond.set(row.unix, row.hr);
     if (row.rr_json) allRr.push(...(JSON.parse(row.rr_json) as number[]));
   }
+  const hrSeries = [...hrBySecond.values()];
 
   const todayRmssd = rmssd(filterRr(allRr));
 
@@ -172,6 +221,7 @@ export async function rollupDay(dateStr?: string, age = 30): Promise<void> {
   const rhr = rhrSource.length > 0 ? rhrSource[Math.floor(rhrSource.length * 0.05)] : null;
 
   const strain = hrSeries.length > 0 ? strainScore(hrSeries, age, rhr) : null;
+  const calories = hrSeries.length > 0 ? caloriesFromHrSeries(hrSeries, age, null, null) : null;
 
   const history = await db.getAllAsync<{ rmssd: number | null }>(
     'SELECT rmssd FROM daily WHERE date < ? ORDER BY date DESC LIMIT 14',
@@ -185,25 +235,55 @@ export async function rollupDay(dateStr?: string, age = 30): Promise<void> {
     nightStart, nightEnd,
   );
   let sleep_minutes: number | null = null;
+  let deep_min: number | null = null;
+  let rem_min: number | null = null;
+  let light_min: number | null = null;
+  let awake_min: number | null = null;
   if (nightRows.length >= 10) {
     const sleepSamples = nightRows.map(r => ({
       ts_utc: new Date(r.unix * 1000).toISOString(),
-      heart_rate_bpm: r.hr,
+      // Drop physiologically-impossible-for-sleep HR so a stray spike can't
+      // inflate the threshold and fragment the night.
+      heart_rate_bpm: (r.hr != null && r.hr >= 30 && r.hr <= 120) ? r.hr : null,
       rr_interval_ms: r.rr_json ? (JSON.parse(r.rr_json) as number[])[0] ?? null : null,
     }));
     const window = detectSleepWindow(sleepSamples, date);
     if (window) {
-      sleep_minutes = Math.round((window[1].getTime() - window[0].getTime()) / 60_000);
+      const totals = stageTotals(classifyStages(sleepSamples, window));
+      deep_min = totals.deep;
+      rem_min = totals.rem;
+      light_min = totals.light;
+      awake_min = totals.wake;
+      const asleep = totals.deep + totals.rem + totals.light;
+      // Time asleep (wake within the window excluded); fall back to window span.
+      sleep_minutes = asleep > 0 ? asleep : Math.round((window[1].getTime() - window[0].getTime()) / 60_000);
     }
   }
 
-  await upsertDaily({ date, rmssd: todayRmssd, rhr, strain, sleep_minutes, recovery });
+  await upsertDaily({
+    date, rmssd: todayRmssd, rhr, strain, sleep_minutes, recovery, calories,
+    deep_min, rem_min, light_min, awake_min,
+  });
 }
 
 // Roll up every distinct calendar day that has samples and either:
 //   - has no row in daily yet, OR
 //   - is today or yesterday (re-roll to capture freshly arrived data)
-export async function rollupAllDays(age = 30): Promise<void> {
+let _rollupRunning: Promise<void> | null = null;
+
+// Coalesces concurrent callers (Home timer, BLE timer, screen mounts, history
+// sync) onto a single run so they can't pile up or race on the daily table.
+export function rollupAllDays(ageArg?: number): Promise<void> {
+  if (_rollupRunning) return _rollupRunning;
+  const run = _rollupAllDaysImpl(ageArg).finally(() => {
+    if (_rollupRunning === run) _rollupRunning = null;
+  });
+  _rollupRunning = run;
+  return run;
+}
+
+async function _rollupAllDaysImpl(ageArg?: number): Promise<void> {
+  const age = ageArg ?? await storedAge();
   const db = await getDb();
   const today = localDateStr(new Date());
   const yesterday = localDateStr(new Date(Date.now() - 86400_000));
@@ -230,4 +310,51 @@ export async function getSampleCount(): Promise<number> {
   const db = await getDb();
   const row = await db.getFirstAsync<{ n: number }>('SELECT COUNT(*) AS n FROM samples');
   return row?.n ?? 0;
+}
+
+// Local date (YYYY-MM-DD) of the most recent sample, or null if none.
+export async function getLatestSampleDate(): Promise<string | null> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ date: string | null }>(
+    `SELECT date(MAX(unix), 'unixepoch', 'localtime') AS date FROM samples`,
+  );
+  return row?.date ?? null;
+}
+
+export interface IntradayPoint { minute: number; hr: number }
+
+// Bucketed mean HR across one calendar day, for the intraday Trends chart.
+export async function getIntradayHr(dateStr: string, bucketMin = 10): Promise<IntradayPoint[]> {
+  const db = await getDb();
+  const startUnix = midnightUnix(dateStr);
+  const endUnix = startUnix + 86400;
+  const rows = await db.getAllAsync<{ unix: number; hr: number }>(
+    'SELECT unix, hr FROM samples WHERE unix >= ? AND unix < ? AND hr IS NOT NULL AND hr >= 30 AND hr <= 220 ORDER BY unix ASC',
+    startUnix, endUnix,
+  );
+  const sums = new Map<number, { sum: number; n: number }>();
+  const bucketSec = bucketMin * 60;
+  for (const r of rows) {
+    const bucket = Math.floor((r.unix - startUnix) / bucketSec);
+    const acc = sums.get(bucket) ?? { sum: 0, n: 0 };
+    acc.sum += r.hr; acc.n += 1;
+    sums.set(bucket, acc);
+  }
+  return [...sums.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([bucket, acc]) => ({ minute: bucket * bucketMin, hr: Math.round(acc.sum / acc.n) }));
+}
+
+export interface ExportSampleRow {
+  unix: number;
+  hr: number | null;
+  rr_json: string | null;
+  source: string | null;
+}
+
+export async function getAllSamples(): Promise<ExportSampleRow[]> {
+  const db = await getDb();
+  return db.getAllAsync<ExportSampleRow>(
+    'SELECT unix, hr, rr_json, source FROM samples ORDER BY unix ASC',
+  );
 }
