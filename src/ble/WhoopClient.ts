@@ -189,7 +189,7 @@ export class WhoopClient {
           }
           case PacketType.HISTORICAL_DATA: {
             try {
-              const rec = parseHistorical(pkt.data);
+              const rec = parseHistorical(pkt.data, pkt.seq);
               this._emit('historicalSample', rec);
             } catch (err) { this._emit('error', err); }
             break;

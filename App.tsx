@@ -3,6 +3,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createStackNavigator } from '@react-navigation/stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Text } from 'react-native';
+import { colors } from './src/theme';
 import { BleProvider } from './src/ble/BleContext';
 import { useBleContext } from './src/ble/BleContext';
 import ScanScreen from './src/screens/ScanScreen';
@@ -19,7 +20,7 @@ function TabLabel({ label, focused }: { label: string; focused: boolean }) {
   return (
     <Text style={{
       fontSize: 12,
-      color: focused ? '#fff' : '#555',
+      color: focused ? colors.text : colors.textFaint,
       fontWeight: focused ? '600' : '400',
       letterSpacing: 0.3,
       marginTop: 4,
@@ -34,7 +35,7 @@ function MainTabs() {
     <Tab.Navigator
       screenOptions={{
         headerShown: false,
-        tabBarStyle: { backgroundColor: '#0a0a0a', borderTopColor: '#1a1a1a', height: 60, paddingBottom: 8 },
+        tabBarStyle: { backgroundColor: colors.bg, borderTopColor: colors.borderFaint, height: 60, paddingBottom: 8 },
         tabBarShowLabel: false,
       }}
     >

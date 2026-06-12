@@ -8,7 +8,8 @@ export const ZONE_BOUNDS: [string, number, number][] = [
 
 export function maxHr(age: number, override: number | null = null): number {
   if (override) return Math.trunc(override);
-  return Math.max(120, 220 - Math.max(1, Math.trunc(age)));
+  // Tanaka (2001): 208 − 0.7·age — more accurate than the classic 220 − age.
+  return Math.max(120, Math.round(208 - 0.7 * Math.max(1, Math.trunc(age))));
 }
 
 export function zoneForHr(hr: number | null | undefined, maxBpm: number): number | null {

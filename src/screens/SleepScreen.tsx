@@ -1,20 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, ScrollView, StyleSheet, useWindowDimensions } from 'react-native';
 import { getDailyHistory, rollupAllDays, DailyRow } from '../storage/db';
-
-const STAGE_COLORS: Record<string, string> = {
-  deep: '#6366f1',
-  rem: '#4ade80',
-  light: '#60a5fa',
-  wake: '#f87171',
-};
-
-const STAGE_LABELS: Record<string, string> = {
-  deep: 'DEEP',
-  rem: 'REM',
-  light: 'LIGHT',
-  wake: 'WAKE',
-};
+import Hypnogram from '../components/Hypnogram';
+import { colors, spacing, radii, stageColors, stageLabels } from '../theme';
 
 const STAGE_ORDER = ['deep', 'rem', 'light', 'wake'] as const;
 type StageKey = typeof STAGE_ORDER[number];
@@ -22,76 +10,84 @@ type StageKey = typeof STAGE_ORDER[number];
 function localDateStr(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
-
 function dateHeadline(dateStr: string): string {
   if (dateStr === localDateStr(new Date())) return 'Today';
   if (dateStr === localDateStr(new Date(Date.now() - 86400_000))) return 'Yesterday';
   return dateStr.slice(5);
 }
-
 function fmt(min: number): string {
   const h = Math.floor(min / 60);
   const m = Math.round(min % 60);
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
-
 function stageMin(row: DailyRow, s: StageKey): number | null {
   return s === 'deep' ? row.deep_min : s === 'rem' ? row.rem_min : s === 'light' ? row.light_min : row.awake_min;
 }
 
-function LegendDot({ stage }: { stage: string }) {
+interface Seg { start: number; end: number; stage: string; }
+function parseStages(json: string | null | undefined): Seg[] {
+  if (!json) return [];
+  try {
+    const arr = JSON.parse(json);
+    return Array.isArray(arr) ? arr : [];
+  } catch { return []; }
+}
+
+function NightStat({ label, value }: { label: string; value: string }) {
   return (
-    <View style={styles.legendItem}>
-      <View style={[styles.dot, { backgroundColor: STAGE_COLORS[stage] }]} />
-      <Text style={styles.legendLabel}>{STAGE_LABELS[stage]}</Text>
+    <View style={styles.nightStat}>
+      <Text style={styles.nightStatVal}>{value}</Text>
+      <Text style={styles.nightStatLabel}>{label}</Text>
     </View>
   );
 }
 
 function SleepNight({ row }: { row: DailyRow }) {
   const { width } = useWindowDimensions();
-  const barWidth = width - 64;
+  const cardWidth = width - 64;
   const total = row.sleep_minutes ?? 0;
   if (total === 0) return null;
 
+  const stages = parseStages(row.sleep_stages);
+  const effPct = row.sleep_efficiency != null ? Math.round(row.sleep_efficiency * 100) : null;
   const stageTotal = STAGE_ORDER.reduce((a, s) => a + (stageMin(row, s) ?? 0), 0);
-  const hasStages = stageTotal > 0;
 
   return (
     <View style={styles.nightCard}>
       <View style={styles.nightHeader}>
         <Text style={styles.nightDate}>{dateHeadline(row.date)}</Text>
-        <Text style={styles.nightTotal}>{fmt(total)} asleep</Text>
+        <Text style={styles.nightTotal}>{fmt(total)}{effPct != null ? ` · ${effPct}%` : ''}</Text>
       </View>
 
-      {hasStages ? (
-        <View style={[styles.stageBar, { width: barWidth }]}>
+      {stages.length > 0 ? (
+        <Hypnogram stages={stages} width={cardWidth} height={128} />
+      ) : stageTotal > 0 ? (
+        <View style={[styles.fallbackBar, { width: cardWidth }]}>
           {STAGE_ORDER.map(s => {
             const m = stageMin(row, s) ?? 0;
             if (m <= 0) return null;
-            return <View key={s} style={{ width: (m / stageTotal) * barWidth, backgroundColor: STAGE_COLORS[s] }} />;
+            return <View key={s} style={{ width: (m / stageTotal) * cardWidth, backgroundColor: stageColors[s] }} />;
           })}
         </View>
-      ) : (
-        <View style={[styles.stageBar, { width: barWidth }]}>
-          <View style={{ width: Math.min(barWidth, (total / 600) * barWidth), backgroundColor: '#60a5fa' }} />
+      ) : null}
+
+      {stageTotal > 0 && (
+        <View style={styles.stageStats}>
+          {STAGE_ORDER.map(s => (
+            <View key={s} style={styles.stageStat}>
+              <View style={[styles.dot, { backgroundColor: stageColors[s] }]} />
+              <Text style={styles.stageStatLabel}>{stageLabels[s]}</Text>
+              <Text style={styles.stageStatVal}>{stageMin(row, s) != null ? fmt(stageMin(row, s)!) : '--'}</Text>
+            </View>
+          ))}
         </View>
       )}
 
-      {hasStages && (
-        <View style={styles.stageStats}>
-          {STAGE_ORDER.map(s => {
-            const m = stageMin(row, s);
-            return (
-              <View key={s} style={styles.stageStat}>
-                <View style={[styles.dot, { backgroundColor: STAGE_COLORS[s] }]} />
-                <Text style={styles.stageStatLabel}>{STAGE_LABELS[s]}</Text>
-                <Text style={styles.stageStatVal}>{m != null ? fmt(m) : '--'}</Text>
-              </View>
-            );
-          })}
-        </View>
-      )}
+      <View style={styles.nightStatsRow}>
+        <NightStat label="RESTING HR" value={row.rhr != null ? `${Math.round(row.rhr)}` : '--'} />
+        <NightStat label="HRV" value={row.rmssd != null ? `${Math.round(row.rmssd)}` : '--'} />
+        <NightStat label="RESP" value={row.resp_rate != null ? `${Math.round(row.resp_rate * 10) / 10}` : '--'} />
+      </View>
     </View>
   );
 }
@@ -113,10 +109,6 @@ export default function SleepScreen() {
     <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
       <Text style={styles.title}>Sleep</Text>
 
-      <View style={styles.legend}>
-        {STAGE_ORDER.map(s => <LegendDot key={s} stage={s} />)}
-      </View>
-
       {rows.length === 0 ? (
         <View style={styles.emptyInner}>
           <Text style={styles.emptyText}>No sleep data yet</Text>
@@ -130,23 +122,24 @@ export default function SleepScreen() {
 }
 
 const styles = StyleSheet.create({
-  scroll: { flex: 1, backgroundColor: '#000' },
-  content: { padding: 16, paddingBottom: 40 },
-  title: { fontSize: 28, fontWeight: '700', color: '#fff', marginBottom: 16 },
-  legend: { flexDirection: 'row', gap: 16, marginBottom: 20 },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  dot: { width: 8, height: 8, borderRadius: 4 },
-  legendLabel: { fontSize: 11, color: '#555', letterSpacing: 1 },
-  nightCard: { backgroundColor: '#111', borderRadius: 14, padding: 16, marginBottom: 12 },
-  nightHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  nightDate: { fontSize: 15, color: '#fff', fontWeight: '600' },
-  nightTotal: { fontSize: 14, color: '#888' },
-  stageBar: { flexDirection: 'row', height: 22, borderRadius: 5, overflow: 'hidden', backgroundColor: '#1a1a1a' },
-  stageStats: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 14 },
+  scroll: { flex: 1, backgroundColor: colors.bg },
+  content: { padding: spacing.lg, paddingBottom: 40 },
+  title: { fontSize: 28, fontWeight: '700', color: colors.text, marginBottom: spacing.lg },
+  nightCard: { backgroundColor: colors.surface, borderRadius: radii.lg, padding: spacing.lg, marginBottom: spacing.md },
+  nightHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md },
+  nightDate: { fontSize: 15, color: colors.text, fontWeight: '600' },
+  nightTotal: { fontSize: 14, color: colors.textDim },
+  fallbackBar: { flexDirection: 'row', height: 22, borderRadius: 5, overflow: 'hidden', backgroundColor: colors.surfaceAlt },
+  stageStats: { flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.md },
   stageStat: { alignItems: 'center', gap: 4, flex: 1 },
-  stageStatLabel: { fontSize: 10, color: '#555', letterSpacing: 1 },
-  stageStatVal: { fontSize: 13, color: '#ccc', fontWeight: '500' },
+  dot: { width: 8, height: 8, borderRadius: 4 },
+  stageStatLabel: { fontSize: 10, color: colors.textFaint, letterSpacing: 1 },
+  stageStatVal: { fontSize: 13, color: colors.textDim, fontWeight: '500' },
+  nightStatsRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: spacing.lg, borderTopWidth: 1, borderTopColor: colors.borderFaint, paddingTop: spacing.md },
+  nightStat: { alignItems: 'center', flex: 1 },
+  nightStatVal: { fontSize: 18, fontWeight: '600', color: colors.text },
+  nightStatLabel: { fontSize: 10, color: colors.textFaint, letterSpacing: 1, marginTop: 2 },
   emptyInner: { alignItems: 'center', marginTop: 60 },
-  emptyText: { fontSize: 18, color: '#555', fontWeight: '600' },
-  emptySubtext: { fontSize: 13, color: '#333', marginTop: 8, textAlign: 'center', paddingHorizontal: 32 },
+  emptyText: { fontSize: 18, color: colors.textFaint, fontWeight: '600' },
+  emptySubtext: { fontSize: 13, color: colors.textGhost, marginTop: 8, textAlign: 'center', paddingHorizontal: 32 },
 });

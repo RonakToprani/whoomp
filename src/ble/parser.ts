@@ -4,6 +4,16 @@ function u16le(d: Uint8Array, off: number): number { return d[off] | (d[off + 1]
 function u32le(d: Uint8Array, off: number): number {
   return (d[off] | (d[off + 1] << 8) | (d[off + 2] << 16) | (d[off + 3] << 24)) >>> 0;
 }
+function f32le(d: Uint8Array, off: number): number {
+  return new DataView(d.buffer, d.byteOffset + off, 4).getFloat32(0, true);
+}
+
+// A historical record's "version" is the seq byte (frame[5] → WhoopPacket.seq). V24/V12
+// carry the full biometric DSP block — gravity/accelerometer, SpO2, skin-temp, respiration —
+// in the same type-47 frame; V5/7/9 are generic HR/RR-only records. Offsets in the V24 layout
+// are frame-absolute; pkt.data starts at frame offset 7, so data offset = frame offset − 7.
+// Confirmed against a real WHOOP 4.0 (schema note: "V24 ... verified on 762 device records").
+export const BIOMETRIC_HISTORICAL_VERSIONS = new Set<number>([12, 24]);
 
 export interface RealtimeResult {
   type: 'realtime';
@@ -21,6 +31,19 @@ export interface HistoricalResult {
   isoUtc: string;
   heartRateBpm: number | null;
   rrIntervalsMs: number[];
+  /** Record version (seq byte). 24/12 = full biometric block; 5/7/9 = HR/RR only. */
+  version: number;
+  /** Gravity vector in g (≈1g magnitude). Only present on V24/V12 frames. */
+  gravity?: { x: number; y: number; z: number };
+  /** Skin-contact flag: 0 = off-wrist. Only present on V24/V12 frames. */
+  skinContact?: number;
+  /** Raw SpO2 red/IR ADCs (SpO2 % is computed from these). V24/V12 only. */
+  spo2Red?: number;
+  spo2Ir?: number;
+  /** Raw skin-temperature ADC (°C computed downstream). V24/V12 only. */
+  skinTempRaw?: number;
+  /** Raw respiration channel ADC (breaths/min derived downstream). V24/V12 only. */
+  respRaw?: number;
 }
 
 export interface MetadataResult {
@@ -81,7 +104,7 @@ export function parseRealtime(data: Uint8Array, { recvAt = Date.now() } = {}): R
   };
 }
 
-export function parseHistorical(data: Uint8Array): HistoricalResult {
+export function parseHistorical(data: Uint8Array, version = 0): HistoricalResult {
   if (data.length < 24) throw new Error(`HISTORICAL body too short: ${data.length}`);
   const unix = u32le(data, 4);
   const subsec = u16le(data, 8);
@@ -93,7 +116,8 @@ export function parseHistorical(data: Uint8Array): HistoricalResult {
     const v = u16le(data, 16 + i * 2);
     if (v >= 200 && v <= 2000) rr.push(v);
   }
-  return {
+
+  const out: HistoricalResult = {
     type: 'historical',
     unix,
     subsec,
@@ -101,7 +125,26 @@ export function parseHistorical(data: Uint8Array): HistoricalResult {
     isoUtc: new Date(unix * 1000).toISOString(),
     heartRateBpm: (heart >= 20 && heart <= 250) ? heart : null,
     rrIntervalsMs: rr,
+    version,
   };
+
+  // Full biometric DSP block (WHOOP 4.0 V24/V12). Each field is decoded only when the
+  // frame is long enough, so a short/truncated record degrades to HR+RR rather than throwing.
+  if (BIOMETRIC_HISTORICAL_VERSIONS.has(version)) {
+    if (data.length >= 45) {
+      const gx = f32le(data, 33), gy = f32le(data, 37), gz = f32le(data, 41);
+      // Reject NaN/Inf garbage; real gravity is a finite ~1g-magnitude vector.
+      if (Number.isFinite(gx) && Number.isFinite(gy) && Number.isFinite(gz)) {
+        out.gravity = { x: gx, y: gy, z: gz };
+      }
+    }
+    if (data.length >= 49) out.skinContact = data[48];
+    if (data.length >= 65) { out.spo2Red = u16le(data, 61); out.spo2Ir = u16le(data, 63); }
+    if (data.length >= 67) out.skinTempRaw = u16le(data, 65);
+    if (data.length >= 75) out.respRaw = u16le(data, 73);
+  }
+
+  return out;
 }
 
 export function parseMetadata(cmd: number, data: Uint8Array): MetadataResult {
@@ -224,7 +267,7 @@ export function decodePacket(pkt: WhoopPacket): DecodedPacket {
     case PacketType.REALTIME_DATA:
       return parseRealtime(pkt.data);
     case PacketType.HISTORICAL_DATA:
-      return parseHistorical(pkt.data);
+      return parseHistorical(pkt.data, pkt.seq);
     case PacketType.METADATA:
       return parseMetadata(pkt.cmd, pkt.data);
     case PacketType.EVENT:

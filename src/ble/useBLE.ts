@@ -1,21 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WhoopClient, ClientState } from './WhoopClient';
 import { insertSample, rollupAllDays, getRecentRrIntervals } from '../storage/db';
-import { rmssd, filterRr } from '../metrics/hrv';
+import { analyzeHrv } from '../metrics/hrv';
 import { caloriesFromHrSeries } from '../metrics/zones';
+import { getProfile, type UserProfile } from '../storage/settings';
 
 const RR_WINDOW = 300;   // ~5 min of RR intervals
 const HR_BUFFER = 60;    // 60-second live sparkline
-const AGE_KEY = '@whoomp/age';
-
-async function getAge(): Promise<number> {
-  try {
-    const v = await AsyncStorage.getItem(AGE_KEY);
-    const n = v ? parseInt(v, 10) : NaN;
-    return Number.isFinite(n) && n > 0 ? n : 30;
-  } catch { return 30; }
-}
 
 export function useBLE() {
   const clientRef = useRef<WhoopClient | null>(null);
@@ -30,9 +21,11 @@ export function useBLE() {
 
   // Accumulate today's HR series for calorie estimate (persists across re-renders)
   const hrTodayRef = useRef<number[]>([]);
+  const profileRef = useRef<UserProfile | null>(null);
 
   useEffect(() => {
     rollupAllDays().catch(() => {});
+    getProfile().then(p => { profileRef.current = p; }).catch(() => {});
 
     const client = new WhoopClient();
     clientRef.current = client;
@@ -47,7 +40,7 @@ export function useBLE() {
           // RR window for HRV
           setRr(prev => {
             const next = [...prev.slice(-RR_WINDOW), ...rrIntervalsMs];
-            setHrv(rmssd(filterRr(next)));
+            setHrv(analyzeHrv(next).rmssd);
             return next;
           });
 
@@ -55,11 +48,10 @@ export function useBLE() {
           if (heartRateBpm != null) {
             setHrBuffer60(prev => [...prev.slice(-(HR_BUFFER - 1)), heartRateBpm]);
 
-            // Running calorie total — accumulate all HR readings since mount
+            // Running calorie total — accumulate all HR readings since mount (Keytel w/ profile)
             hrTodayRef.current.push(heartRateBpm);
-            getAge().then(age => {
-              setCalories(caloriesFromHrSeries(hrTodayRef.current, age, null, null));
-            });
+            const p = profileRef.current;
+            setCalories(caloriesFromHrSeries(hrTodayRef.current, p?.age ?? 30, p?.weightKg ?? null, p?.sex ?? null));
           }
 
           insertSample({
@@ -71,12 +63,17 @@ export function useBLE() {
         }
       ),
 
-      client.on<{ unix: number; heartRateBpm: number | null; rrIntervalsMs: number[]; flashIndex: number }>(
+      client.on<{
+        unix: number; heartRateBpm: number | null; rrIntervalsMs: number[]; flashIndex: number;
+        gravity?: { x: number; y: number; z: number }; respRaw?: number;
+        spo2Red?: number; spo2Ir?: number; skinTempRaw?: number; skinContact?: number;
+      }>(
         'historicalSample',
-        ({ unix, heartRateBpm, rrIntervalsMs, flashIndex }) => {
+        ({ unix, heartRateBpm, rrIntervalsMs, flashIndex, gravity, respRaw, spo2Red, spo2Ir, skinTempRaw, skinContact }) => {
           insertSample({
             unix, hr: heartRateBpm, rrIntervals: rrIntervalsMs, flashIndex,
             source: 'historical',
+            gravity, respRaw, spo2Red, spo2Ir, skinTempRaw, skinContact,
           }).catch(() => {});
         }
       ),
@@ -101,7 +98,7 @@ export function useBLE() {
     getRecentRrIntervals(sinceUnix).then(intervals => {
       if (intervals.length >= 5) {
         setRr(intervals.slice(-RR_WINDOW));
-        setHrv(rmssd(filterRr(intervals)));
+        setHrv(analyzeHrv(intervals).rmssd);
       }
     }).catch(() => {});
 
