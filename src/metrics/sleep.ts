@@ -15,7 +15,7 @@
 // Gravity comes only from V24/V12 historical frames, so legacy nights stored before the channel
 // migration fall back to an HR-only detector (analyzeNight picks automatically).
 
-import { median, rangeFilter, rmssdRaw, sdnnRaw } from './hrv';
+import { median, rangeFilter, cleanRR, rmssdRaw, sdnnRaw } from './hrv';
 import { respRateFromRaw } from './resp';
 
 export type Stage = 'wake' | 'light' | 'deep' | 'rem';
@@ -550,8 +550,10 @@ function sessionAvgHRV(start: number, end: number, rr: RRInterval[]): number | n
   const vals: number[] = [];
   for (let t = start; t < end; t += windowS) {
     const bucket = seg.filter(s => s.ts >= t && s.ts < t + windowS).map(s => s.rrMs);
-    const filtered = rangeFilter(bucket);
-    if (filtered.length >= 2) { const r = rmssdRaw(filtered); if (r != null) vals.push(r); }
+    // Full clean (range + Malik ectopic) — PPG-derived RR has occasional doubled/missed beats that
+    // a bare range filter lets through and that massively inflate RMSSD (the 172 ms artifact).
+    const filtered = cleanRR(bucket);
+    if (filtered.length >= 5) { const r = rmssdRaw(filtered); if (r != null) vals.push(r); }
   }
   return vals.length ? mean(vals) : null;
 }

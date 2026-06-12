@@ -4,6 +4,7 @@ import { useBleContext } from '../ble/BleContext';
 import { zoneForHr, maxHr } from '../metrics/zones';
 import { getProfile, NEUTRAL_AGE } from '../storage/settings';
 import HRChart from '../components/HRChart';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, radii, zoneColors, zoneNames, restColor } from '../theme';
 
 // Strip cells: a leading "Rest" band (below Z1) then Z1–Z5. Fixes the gap where a
@@ -26,6 +27,7 @@ export default function LiveScreen() {
   const [age, setAge] = useState(NEUTRAL_AGE);
   const [elapsed, setElapsed] = useState(0);
   const { width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
 
   useEffect(() => { getProfile().then(p => setAge(p.age)).catch(() => {}); }, []);
 
@@ -45,7 +47,7 @@ export default function LiveScreen() {
 
   return (
     <View style={styles.container}>
-      {battery != null && <Text style={styles.battery}>{Math.round(battery)}%</Text>}
+      {battery != null && <Text style={[styles.battery, { top: insets.top + 4 }]}>{Math.round(battery)}%</Text>}
 
       <Text style={[styles.bpm, heartRate == null && styles.dim]}>{heartRate ?? '--'}</Text>
       <Text style={styles.unit}>BPM</Text>

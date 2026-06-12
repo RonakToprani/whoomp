@@ -7,6 +7,7 @@ import { useBleContext } from '../ble/BleContext';
 import { getDailyHistory, getSampleCount, getAllSamples } from '../storage/db';
 import { getProfile, setProfile, ageFromDob, type Sex } from '../storage/settings';
 import { tanakaHRmax } from '../metrics/strain';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, radii } from '../theme';
 
 const WRIST_KEY = '@whoomp/wrist';
@@ -20,6 +21,7 @@ export default function SettingsScreen() {
   const [wrist, setWrist] = useState<'left' | 'right'>('left');
   const [sampleCount, setSampleCount] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
+  const insets = useSafeAreaInsets();
 
   useEffect(() => {
     getProfile().then(p => {
@@ -79,7 +81,7 @@ export default function SettingsScreen() {
   };
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <ScrollView style={styles.container} contentContainerStyle={[styles.content, { paddingTop: insets.top + spacing.sm }]}>
       <Text style={styles.title}>Settings</Text>
 
       <View style={styles.section}>

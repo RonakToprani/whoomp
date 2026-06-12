@@ -9,6 +9,7 @@ import { useBleContext } from '../ble/BleContext';
 import { getDailyHistory, rollupAllDays, DailyRow } from '../storage/db';
 import { deviation, MIN_NIGHTS_SEED } from '../metrics/baselines';
 import { getProfile } from '../storage/settings';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, radii } from '../theme';
 
 function localDateStr(d: Date): string {
@@ -34,6 +35,7 @@ export default function HomeScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [profileComplete, setProfileComplete] = useState(true);
   const { width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
 
   useEffect(() => {
     getProfile().then(p => setProfileComplete(p.complete)).catch(() => {});
@@ -88,25 +90,32 @@ export default function HomeScreen() {
 
   const recovery = featured?.recovery ?? null;
   const strain = featured?.strain ?? null;
+  const liveMode = hrv != null; // connected & a live HRV reading is available
   const displayHrv = hrv ?? featured?.rmssd ?? null;
   const rhr = featured?.rhr ?? null;
   const resp = featured?.resp_rate ?? null;
   const displayCalories = featured?.calories ?? (calories > 0 ? calories : null);
 
-  const hrvZ = featured ? devZ(featured.rmssd, featured.hrv_baseline, featured.hrv_spread) : null;
-  const rhrZ = featured ? devZ(featured.rhr, featured.rhr_baseline, featured.rhr_spread) : null;
+  // Deviation vs baseline is only meaningful once the baseline is usable (≥4 nights). During
+  // calibration the spread sits at its floor and z-scores explode (the bogus "24.8σ"), so suppress
+  // them. The HRV caption is also suppressed in live mode (a live reading vs a nightly baseline is
+  // apples-to-oranges) — the card then just reads "live".
+  const baselineUsable = featured?.recovery_state === 'provisional' || featured?.recovery_state === 'trusted';
+  const hrvZ = !liveMode && baselineUsable && featured ? devZ(featured.rmssd, featured.hrv_baseline, featured.hrv_spread) : null;
+  const rhrZ = baselineUsable && featured ? devZ(featured.rhr, featured.rhr_baseline, featured.rhr_spread) : null;
 
   const priorValid = featured ? rows.filter(r => r.rmssd != null && r.date < featured.date).length : 0;
   const calibrating = recovery == null && priorValid < MIN_NIGHTS_SEED ? { n: priorValid, seed: MIN_NIGHTS_SEED } : null;
 
   const sleepStr = fmtSleep(featured?.sleep_minutes);
-  const effPct = featured?.sleep_efficiency != null ? `${Math.round(featured.sleep_efficiency * 100)}% efficiency` : undefined;
+  const effRounded = featured?.sleep_efficiency != null ? Math.round(featured.sleep_efficiency * 100) : null;
+  const effPct = effRounded != null && effRounded < 99 ? `${effRounded}% efficiency` : undefined;
   const chartWidth = width - 76;
 
   return (
     <ScrollView
       style={styles.scroll}
-      contentContainerStyle={styles.content}
+      contentContainerStyle={[styles.content, { paddingTop: insets.top + spacing.sm }]}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.textFaint} />}
     >
       <View style={styles.titleRow}>
@@ -123,12 +132,12 @@ export default function HomeScreen() {
       )}
 
       <View style={styles.hero}>
-        <RecoveryRing score={recovery} size={156} calibrating={calibrating} />
-        <StrainGauge strain={strain} size={132} />
+        <RecoveryRing score={recovery} size={150} calibrating={calibrating} />
+        <StrainGauge strain={strain} size={150} />
       </View>
 
       <View style={styles.row}>
-        <MetricCard label="HRV (RMSSD)" value={displayHrv != null ? Math.round(displayHrv) : null} unit="ms" z={hrvZ} goodWhen="higher" />
+        <MetricCard label="HRV (RMSSD)" value={displayHrv != null ? Math.round(displayHrv) : null} unit="ms" z={hrvZ} goodWhen="higher" sub={liveMode ? 'live' : undefined} />
         <MetricCard label="RESTING HR" value={rhr != null ? Math.round(rhr) : null} unit="bpm" z={rhrZ} goodWhen="lower" />
       </View>
 

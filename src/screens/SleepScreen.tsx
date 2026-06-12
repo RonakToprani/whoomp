@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { View, Text, ScrollView, StyleSheet, useWindowDimensions } from 'react-native';
 import { getDailyHistory, rollupAllDays, DailyRow } from '../storage/db';
 import Hypnogram from '../components/Hypnogram';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, radii, stageColors, stageLabels } from '../theme';
 
 const STAGE_ORDER = ['deep', 'rem', 'light', 'wake'] as const;
@@ -56,7 +57,7 @@ function SleepNight({ row }: { row: DailyRow }) {
     <View style={styles.nightCard}>
       <View style={styles.nightHeader}>
         <Text style={styles.nightDate}>{dateHeadline(row.date)}</Text>
-        <Text style={styles.nightTotal}>{fmt(total)}{effPct != null ? ` · ${effPct}%` : ''}</Text>
+        <Text style={styles.nightTotal}>{fmt(total)}{effPct != null && effPct < 99 ? ` · ${effPct}% eff` : ''}</Text>
       </View>
 
       {stages.length > 0 ? (
@@ -94,6 +95,7 @@ function SleepNight({ row }: { row: DailyRow }) {
 
 export default function SleepScreen() {
   const [rows, setRows] = useState<DailyRow[]>([]);
+  const insets = useSafeAreaInsets();
 
   useEffect(() => {
     (async () => {
@@ -106,7 +108,7 @@ export default function SleepScreen() {
   }, []);
 
   return (
-    <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
+    <ScrollView style={styles.scroll} contentContainerStyle={[styles.content, { paddingTop: insets.top + spacing.sm }]}>
       <Text style={styles.title}>Sleep</Text>
 
       {rows.length === 0 ? (

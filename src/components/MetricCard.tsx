@@ -19,10 +19,14 @@ interface Props {
 export default function MetricCard({ label, value, unit, z, goodWhen = 'higher', sub, accent }: Props) {
   let caption: React.ReactNode = null;
   if (z != null && Number.isFinite(z)) {
-    const small = Math.abs(z) < 0.5;
+    const az = Math.abs(z);
+    const small = az < 0.5;
     const good = goodWhen === 'lower' ? z < 0 : z > 0;
     const color = small ? colors.textDim : good ? colors.green : colors.red;
-    const text = small ? '• typical' : `${z >= 0 ? '↑' : '↓'} ${Math.abs(z).toFixed(1)}σ ${z >= 0 ? 'above base' : 'below base'}`;
+    const arrow = z >= 0 ? '↑' : '↓';
+    const where = z >= 0 ? 'above base' : 'below base';
+    // Cap the printed magnitude: beyond 3σ the exact value is noise, so just say "well …".
+    const text = small ? '• typical' : az >= 3 ? `${arrow} well ${where}` : `${arrow} ${az.toFixed(1)}σ ${where}`;
     caption = <Text style={[styles.caption, { color }]}>{text}</Text>;
   } else if (sub) {
     caption = <Text style={styles.captionDim}>{sub}</Text>;

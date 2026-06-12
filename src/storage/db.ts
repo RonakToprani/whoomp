@@ -112,6 +112,14 @@ export async function getDb(): Promise<SQLite.SQLiteDatabase> {
     await _db.execAsync('INSERT OR IGNORE INTO schema_version (v) VALUES (4)');
   }
 
+  if (version < 5) {
+    // v4 computed nightly sleep HRV without ectopic rejection, inflating RMSSD (the 172 ms
+    // artifact). Rebuild the derived daily table from the preserved samples so every night uses
+    // the corrected cleaning.
+    await _db.execAsync('DELETE FROM daily');
+    await _db.execAsync('INSERT OR IGNORE INTO schema_version (v) VALUES (5)');
+  }
+
   return _db;
 }
 

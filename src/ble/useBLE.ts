@@ -22,6 +22,7 @@ export function useBLE() {
   // Accumulate today's HR series for calorie estimate (persists across re-renders)
   const hrTodayRef = useRef<number[]>([]);
   const profileRef = useRef<UserProfile | null>(null);
+  const hrRecentRef = useRef<number[]>([]); // last few raw HR for spike rejection
 
   useEffect(() => {
     rollupAllDays().catch(() => {});
@@ -35,28 +36,35 @@ export function useBLE() {
       client.on<{ heartRateBpm: number | null; rrIntervalsMs: number[]; receivedAt: number }>(
         'realtime',
         ({ heartRateBpm, rrIntervalsMs, receivedAt }) => {
-          setHeartRate(heartRateBpm);
-
-          // RR window for HRV
+          // RR window for HRV (analyzeHrv applies range + Malik ectopic cleaning).
           setRr(prev => {
             const next = [...prev.slice(-RR_WINDOW), ...rrIntervalsMs];
             setHrv(analyzeHrv(next).rmssd);
             return next;
           });
 
-          // 60-second HR sparkline
           if (heartRateBpm != null) {
-            setHrBuffer60(prev => [...prev.slice(-(HR_BUFFER - 1)), heartRateBpm]);
+            // Displayed HR = median of the last 3 raw readings. The strap's PPG beat detection
+            // jitters when wrist contact is imperfect (lone spikes like 87→103→87); a median-of-3
+            // rejects those single-sample spikes without lagging genuine HR changes. The raw value
+            // is still stored below for fidelity.
+            const r = hrRecentRef.current;
+            r.push(heartRateBpm);
+            if (r.length > 3) r.shift();
+            const shownHr = [...r].sort((a, b) => a - b)[r.length >> 1];
+            setHeartRate(shownHr);
+            setHrBuffer60(prev => [...prev.slice(-(HR_BUFFER - 1)), shownHr]);
 
-            // Running calorie total — accumulate all HR readings since mount (Keytel w/ profile)
-            hrTodayRef.current.push(heartRateBpm);
+            hrTodayRef.current.push(shownHr);
             const p = profileRef.current;
             setCalories(caloriesFromHrSeries(hrTodayRef.current, p?.age ?? 30, p?.weightKg ?? null, p?.sex ?? null));
+          } else {
+            setHeartRate(null);
           }
 
           insertSample({
             unix: Math.floor(receivedAt / 1000),
-            hr: heartRateBpm,
+            hr: heartRateBpm, // raw, for fidelity
             rrIntervals: rrIntervalsMs,
             source: 'realtime',
           }).catch(() => {});

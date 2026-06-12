@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { View, Text, ScrollView, StyleSheet, useWindowDimensions } from 'react-native';
 import Svg, { Polyline, Line, Circle, Rect } from 'react-native-svg';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   getDailyHistory, getLatestSampleDate, getIntradayHr, rollupAllDays,
   DailyRow, IntradayPoint,
@@ -118,6 +119,7 @@ export default function TrendsScreen() {
   const [intraday, setIntraday] = useState<IntradayPoint[]>([]);
   const [intradayDate, setIntradayDate] = useState<string | null>(null);
   const { width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const chartWidth = width - 64;
 
   const load = useCallback(async () => {
@@ -143,7 +145,7 @@ export default function TrendsScreen() {
   const intradayHrs = intraday.map(p => p.hr);
 
   return (
-    <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
+    <ScrollView style={styles.scroll} contentContainerStyle={[styles.content, { paddingTop: insets.top + spacing.sm }]}>
       <Text style={styles.title}>Trends</Text>
 
       {intraday.length >= 2 && intradayDate && (
