@@ -1,3 +1,4 @@
+/// <reference types="node" />
 // Offline replay harness — diagnose sleep staging against a real exported night.
 //
 // Not part of the normal suite: skips unless NIGHT_CSV points at a whoomp "Export all samples (CSV)"

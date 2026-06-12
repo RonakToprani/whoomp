@@ -12,6 +12,10 @@ import { colors, spacing, radii } from '../theme';
 
 const WRIST_KEY = '@whoomp/wrist';
 
+// Visible build marker — bump on every install so a new build is confirmable at a glance
+// (the app has no other version cue and same-version reinstalls look identical).
+const BUILD_TAG = 'build 2 · engine v6 (aggregate night + RSA resp)';
+
 export default function SettingsScreen() {
   const { state, disconnect } = useBleContext();
   const [dob, setDob] = useState('');
@@ -155,6 +159,8 @@ export default function SettingsScreen() {
           <Text style={styles.outlineBtnText}>Export daily summary (CSV)</Text>
         </TouchableOpacity>
       </View>
+
+      <Text style={styles.buildTag}>{BUILD_TAG}</Text>
     </ScrollView>
   );
 }
@@ -184,4 +190,5 @@ const styles = StyleSheet.create({
   outlineBtnText: { fontSize: 14, color: colors.textDim },
   btnDisabled: { opacity: 0.4 },
   dataLine: { fontSize: 14, color: colors.textFaint },
+  buildTag: { fontSize: 11, color: colors.textGhost, textAlign: 'center', marginTop: spacing.md },
 });
