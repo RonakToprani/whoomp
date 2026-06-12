@@ -73,8 +73,12 @@ export default function SettingsScreen() {
     try {
       const rows = await getAllSamples();
       const csv = [
-        'unix,iso_utc,hr_bpm,rr_intervals_ms,source',
-        ...rows.map(r => [r.unix, new Date(r.unix * 1000).toISOString(), r.hr ?? '', r.rr_json ? (JSON.parse(r.rr_json) as number[]).join('|') : '', r.source ?? ''].join(',')),
+        'unix,iso_utc,hr_bpm,rr_intervals_ms,source,gx,gy,gz,resp_raw,skin_contact',
+        ...rows.map(r => [
+          r.unix, new Date(r.unix * 1000).toISOString(), r.hr ?? '',
+          r.rr_json ? (JSON.parse(r.rr_json) as number[]).join('|') : '', r.source ?? '',
+          r.gx ?? '', r.gy ?? '', r.gz ?? '', r.resp_raw ?? '', r.skin_contact ?? '',
+        ].join(',')),
       ].join('\n');
       await writeAndShare('whoomp-samples.csv', csv);
     } catch { Alert.alert('Export failed'); } finally { setExporting(false); }

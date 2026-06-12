@@ -460,11 +460,16 @@ export interface ExportSampleRow {
   hr: number | null;
   rr_json: string | null;
   source: string | null;
+  gx: number | null;
+  gy: number | null;
+  gz: number | null;
+  resp_raw: number | null;
+  skin_contact: number | null;
 }
 
 export async function getAllSamples(): Promise<ExportSampleRow[]> {
   const db = await getDb();
   return db.getAllAsync<ExportSampleRow>(
-    'SELECT unix, hr, rr_json, source FROM samples ORDER BY unix ASC',
+    'SELECT unix, hr, rr_json, source, gx, gy, gz, resp_raw, skin_contact FROM samples ORDER BY unix ASC',
   );
 }
