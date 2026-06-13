@@ -233,3 +233,21 @@ export class WhoopPacket {
 export function buildCommandFrame(cmd: number, payload: Uint8Array = new Uint8Array(), seq: number = 0): Uint8Array {
   return new WhoopPacket(PacketType.COMMAND, seq, cmd, payload).framed();
 }
+
+// SET_CLOCK(10) payloads. The payload LENGTH is firmware-specific and LOAD-BEARING on WHOOP 4.0:
+// newer firmware latches the 8-byte form `[u32 LE seconds][4 zero subseconds]`, but fw 41.17.x
+// IGNORES the 8-byte form outright (no COMMAND_RESPONSE, RTC unchanged) and latches ONLY the legacy
+// 9-byte form `[u32 LE seconds][5 zero]`. A strap that misses the set keeps an invalid RTC (~1971)
+// and banks NO sensor data to flash ("RTC timestamp … is invalid; not saving data to flash"), so
+// every history drain returns console-only frames. Send BOTH forms (one is a no-op on any given
+// firmware; both carry the same seconds, so double-latching is harmless). Mirrors NOOP's
+// setClockPayload / setClockPayloadLegacy (#120) — verified there byte-for-byte.
+export function setClockPayload(unixSec: number): Uint8Array {
+  const s = unixSec >>> 0;
+  return new Uint8Array([s & 0xff, (s >>> 8) & 0xff, (s >>> 16) & 0xff, (s >>> 24) & 0xff, 0, 0, 0, 0]);
+}
+
+export function setClockPayloadLegacy(unixSec: number): Uint8Array {
+  const s = unixSec >>> 0;
+  return new Uint8Array([s & 0xff, (s >>> 8) & 0xff, (s >>> 16) & 0xff, (s >>> 24) & 0xff, 0, 0, 0, 0, 0]);
+}

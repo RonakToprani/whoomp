@@ -14,7 +14,7 @@ const WRIST_KEY = '@whoomp/wrist';
 
 // Visible build marker — bump on every install so a new build is confirmable at a glance
 // (the app has no other version cue and same-version reinstalls look identical).
-const BUILD_TAG = 'build 6 · tuned sleep staging (Fitbit-matched)';
+const BUILD_TAG = 'build 7 · RTC auto-hold (both-form clock + keep-alive)';
 
 function fmtClock(unix: number): string {
   const d = new Date(unix * 1000);
@@ -187,8 +187,9 @@ export default function SettingsScreen() {
       <View style={styles.section}>
         <Text style={styles.sectionLabel}>SYNC / HISTORY</Text>
         <Text style={styles.syncHint}>
-          Accurate sleep needs the strap's flash store (gravity + full nights). Historical = 0 means it
-          hasn't drained — close the official WHOOP app first (it holds the strap's single BLE link).
+          Accurate sleep needs the strap's flash store (gravity + full nights). The strap only banks to
+          flash while its RTC is valid — whoomp now holds the clock (both firmware forms on connect,
+          re-set on drift/reboot). "Strap RTC: VALID" + "Historical in DB" climbing means it's working.
         </Text>
         <SyncRow k="State" v={syncStatus.state === 'syncing' ? 'syncing…' : syncStatus.state} />
         <SyncRow
@@ -209,10 +210,10 @@ export default function SettingsScreen() {
 
         {syncStatus.consoleOnlyStreak >= 2 && syncStatus.historical === 0 ? (
           <Text style={styles.syncWarn}>
-            Strap is returning diagnostics but no banked sensor history ({syncStatus.consoleOnlyStreak}× in a row).
-            That means its clock was lost or the official WHOOP app is draining + trimming the flash. The clock is
-            now re-set on every connect — fully close/delete the WHOOP app, keep whoomp connected, and historical
-            data should start banking within ~15 min.
+            Strap is returning diagnostics but no banked sensor history ({syncStatus.consoleOnlyStreak}× in a row) —
+            its RTC is lost, so it isn't saving to flash. whoomp is re-latching the clock (both firmware forms) and
+            holding it; keep it connected a few minutes. If "Strap RTC" stays INVALID, fully charge the strap to
+            100% and let it reboot — that clears a stuck RTC so the clock can latch.
           </Text>
         ) : null}
 

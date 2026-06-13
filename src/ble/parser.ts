@@ -216,6 +216,10 @@ export function parseBatteryResponse(data: Uint8Array): number | null {
   return u16le(data, 2) / 10;
 }
 
+// GET_CLOCK reply: the strap's RTC as a u32 LE at payload offset 2 (whoof's observed layout). Returns
+// the RAW value — including a lost-RTC ~1971 value — so the caller can classify valid vs invalid by
+// range (a byte-by-byte "find any plausible unix" scan is NOT safe here: misaligned bytes of a lost
+// ~31.8M value + zero padding can form a spurious in-range u32, misreporting a lost clock as valid).
 export function parseClockResponse(data: Uint8Array): number | null {
   if (data.length < 6) return null;
   return u32le(data, 2);
