@@ -14,10 +14,31 @@ const WRIST_KEY = '@whoomp/wrist';
 
 // Visible build marker — bump on every install so a new build is confirmable at a glance
 // (the app has no other version cue and same-version reinstalls look identical).
-const BUILD_TAG = 'build 2 · engine v6 (aggregate night + RSA resp)';
+const BUILD_TAG = 'build 3 · flash-drain sync + diagnostics';
+
+function fmtClock(unix: number): string {
+  const d = new Date(unix * 1000);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+function fmtAgo(ms: number | null): string {
+  if (ms == null) return 'never';
+  const s = Math.floor((Date.now() - ms) / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
+}
+
+function SyncRow({ k, v, bad }: { k: string; v: string; bad?: boolean }) {
+  return (
+    <View style={styles.syncRow}>
+      <Text style={styles.syncKey}>{k}</Text>
+      <Text style={[styles.syncVal, bad && styles.syncBad]} numberOfLines={1}>{v}</Text>
+    </View>
+  );
+}
 
 export default function SettingsScreen() {
-  const { state, disconnect } = useBleContext();
+  const { state, disconnect, syncStatus, syncNow, refreshSyncCounts } = useBleContext();
   const [dob, setDob] = useState('');
   const [sex, setSex] = useState<Sex>('M');
   const [weight, setWeight] = useState('');
@@ -37,6 +58,9 @@ export default function SettingsScreen() {
     AsyncStorage.getItem(WRIST_KEY).then(v => { if (v === 'right') setWrist('right'); }).catch(() => {});
     getSampleCount().then(setSampleCount).catch(() => {});
   }, []);
+
+  // Refresh the realtime/historical/gravity counters whenever the Settings screen opens.
+  useEffect(() => { refreshSyncCounts(); }, [refreshSyncCounts]);
 
   const saveDob = (v: string) => { setDob(v); if (/^\d{4}-\d{2}-\d{2}$/.test(v)) setProfile({ dob: v }).catch(() => {}); };
   const saveSex = (v: Sex) => { setSex(v); setProfile({ sex: v }).catch(() => {}); };
@@ -160,6 +184,33 @@ export default function SettingsScreen() {
         </TouchableOpacity>
       </View>
 
+      <View style={styles.section}>
+        <Text style={styles.sectionLabel}>SYNC / HISTORY</Text>
+        <Text style={styles.syncHint}>
+          Accurate sleep needs the strap's flash store (gravity + full nights). Historical = 0 means it
+          hasn't drained — close the official WHOOP app first (it holds the strap's single BLE link).
+        </Text>
+        <SyncRow k="State" v={syncStatus.state === 'syncing' ? 'syncing…' : syncStatus.state} />
+        <SyncRow k="Strap has" v={syncStatus.strapRange ? `${fmtClock(syncStatus.strapRange.startUnix)} → ${fmtClock(syncStatus.strapRange.endUnix)}` : '—'} />
+        <SyncRow k="Historical in DB" v={`${syncStatus.historical.toLocaleString()}${syncStatus.histRange ? `  (${fmtClock(syncStatus.histRange.minUnix)}→${fmtClock(syncStatus.histRange.maxUnix)})` : ''}`} bad={syncStatus.historical === 0} />
+        <SyncRow k="With gravity" v={syncStatus.withGravity.toLocaleString()} bad={syncStatus.withGravity === 0} />
+        <SyncRow k="Realtime in DB" v={syncStatus.realtime.toLocaleString()} />
+        <SyncRow k="Last drain" v={`${fmtAgo(syncStatus.lastSyncAt)}${syncStatus.lastFrames != null ? ` · ${syncStatus.lastFrames} frames` : ''}`} />
+        {syncStatus.lastError ? <Text style={styles.syncErr}>⚠ {syncStatus.lastError}</Text> : null}
+
+        <TouchableOpacity
+          style={[styles.outlineBtn, { marginTop: 12 }, state !== 'connected' && styles.btnDisabled]}
+          onPress={() => syncNow()} disabled={state !== 'connected'}>
+          <Text style={styles.outlineBtnText}>{state === 'connected' ? 'Sync history now' : 'Connect to sync history'}</Text>
+        </TouchableOpacity>
+
+        {syncStatus.log.length > 0 && (
+          <View style={styles.logBox}>
+            {syncStatus.log.slice(-10).map((l, i) => <Text key={i} style={styles.logLine}>{l}</Text>)}
+          </View>
+        )}
+      </View>
+
       <Text style={styles.buildTag}>{BUILD_TAG}</Text>
     </ScrollView>
   );
@@ -191,4 +242,12 @@ const styles = StyleSheet.create({
   btnDisabled: { opacity: 0.4 },
   dataLine: { fontSize: 14, color: colors.textFaint },
   buildTag: { fontSize: 11, color: colors.textGhost, textAlign: 'center', marginTop: spacing.md },
+  syncHint: { fontSize: 12, color: colors.textFaint, marginBottom: spacing.md, lineHeight: 17 },
+  syncRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 5, borderBottomWidth: 1, borderBottomColor: colors.borderFaint },
+  syncKey: { fontSize: 13, color: colors.textDim },
+  syncVal: { fontSize: 13, color: colors.text, fontWeight: '600', flexShrink: 1, marginLeft: 12, textAlign: 'right' },
+  syncBad: { color: colors.red },
+  syncErr: { fontSize: 12, color: colors.red, marginTop: spacing.sm },
+  logBox: { marginTop: spacing.md, backgroundColor: colors.surfaceAlt, borderRadius: radii.sm, padding: spacing.sm },
+  logLine: { fontSize: 10, color: colors.textDim, fontFamily: 'Courier', lineHeight: 14 },
 });

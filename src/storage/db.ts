@@ -422,6 +422,29 @@ export async function getSampleCount(): Promise<number> {
   return row?.n ?? 0;
 }
 
+// Sync diagnostics: how many samples came from realtime vs the historical flash drain, and the
+// time span of the historical (gravity-bearing) data. Used by the Settings sync panel to make the
+// flash-drain visible — historical=0 means the strap's 14-day store has never reached the phone.
+export async function getSourceCounts(): Promise<{ realtime: number; historical: number; withGravity: number }> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ rt: number; hist: number; grav: number }>(
+    `SELECT
+       SUM(CASE WHEN source='realtime'   THEN 1 ELSE 0 END) AS rt,
+       SUM(CASE WHEN source='historical' THEN 1 ELSE 0 END) AS hist,
+       SUM(CASE WHEN gx IS NOT NULL      THEN 1 ELSE 0 END) AS grav
+     FROM samples`,
+  );
+  return { realtime: row?.rt ?? 0, historical: row?.hist ?? 0, withGravity: row?.grav ?? 0 };
+}
+
+export async function getHistoricalRange(): Promise<{ minUnix: number; maxUnix: number } | null> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ lo: number | null; hi: number | null }>(
+    `SELECT MIN(unix) AS lo, MAX(unix) AS hi FROM samples WHERE source='historical'`,
+  );
+  return row?.lo != null && row?.hi != null ? { minUnix: row.lo, maxUnix: row.hi } : null;
+}
+
 // Local date (YYYY-MM-DD) of the most recent sample, or null if none.
 export async function getLatestSampleDate(): Promise<string | null> {
   const db = await getDb();

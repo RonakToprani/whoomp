@@ -1,12 +1,36 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { WhoopClient, ClientState } from './WhoopClient';
-import { insertSample, rollupAllDays, getRecentRrIntervals } from '../storage/db';
+import { insertSample, rollupAllDays, getRecentRrIntervals, getSourceCounts, getHistoricalRange } from '../storage/db';
 import { analyzeHrv, rangeFilter, median } from '../metrics/hrv';
 import { caloriesFromHrSeries } from '../metrics/zones';
 import { getProfile, type UserProfile } from '../storage/settings';
 
 const RR_WINDOW = 300;   // ~5 min of RR intervals
 const HR_BUFFER = 60;    // 60-second live sparkline
+const SYNC_LOG_MAX = 30; // rolling sync-diagnostic log lines kept for the Settings panel
+
+export interface SyncStatus {
+  state: 'idle' | 'syncing' | 'done' | 'error';
+  lastSyncAt: number | null;   // ms epoch of last completed sync
+  lastFrames: number | null;   // frames in the last/current drain
+  realtime: number;            // DB realtime sample count
+  historical: number;          // DB historical sample count (gravity-bearing)
+  withGravity: number;         // DB samples carrying gravity
+  strapRange: { startUnix: number; endUnix: number } | null; // GET_DATA_RANGE (what the strap has)
+  histRange: { minUnix: number; maxUnix: number } | null;    // span of historical data in the DB
+  lastError: string | null;
+  log: string[];
+}
+
+const INITIAL_SYNC: SyncStatus = {
+  state: 'idle', lastSyncAt: null, lastFrames: null, realtime: 0, historical: 0,
+  withGravity: 0, strapRange: null, histRange: null, lastError: null, log: [],
+};
+
+function hhmmss(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+}
 
 export function useBLE() {
   const clientRef = useRef<WhoopClient | null>(null);
@@ -18,11 +42,23 @@ export function useBLE() {
   const [hrBuffer60, setHrBuffer60] = useState<(number | null)[]>([]);
   const [sessionStartUnix, setSessionStartUnix] = useState<number | null>(null);
   const [calories, setCalories] = useState<number>(0);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(INITIAL_SYNC);
 
   // Accumulate today's HR series for calorie estimate (persists across re-renders)
   const hrTodayRef = useRef<number[]>([]);
   const profileRef = useRef<UserProfile | null>(null);
   const hrRecentRef = useRef<number[]>([]); // last few raw HR for spike rejection
+
+  const pushLog = (log: string[], line: string): string[] =>
+    [...log.slice(-(SYNC_LOG_MAX - 1)), `${hhmmss(Date.now())}  ${line}`];
+
+  // Refresh DB-derived sync counters (realtime vs historical, gravity coverage, historical span).
+  const refreshSyncCounts = useCallback(async () => {
+    try {
+      const [c, hr] = await Promise.all([getSourceCounts(), getHistoricalRange()]);
+      setSyncStatus(s => ({ ...s, realtime: c.realtime, historical: c.historical, withGravity: c.withGravity, histRange: hr }));
+    } catch {}
+  }, []);
 
   useEffect(() => {
     rollupAllDays().catch(() => {});
@@ -94,14 +130,34 @@ export function useBLE() {
         }
       ),
 
-      client.on<{ samples: number }>('historyComplete', () => {
-        rollupAllDays().catch(() => {});
+      // ── Historical flash-drain diagnostics (Settings sync panel) ──
+      client.on('historyStart', () => {
+        setSyncStatus(s => ({ ...s, state: 'syncing', lastFrames: 0, lastError: null, log: pushLog(s.log, 'sync started → SEND_HISTORICAL_DATA') }));
+      }),
+      client.on<{ samples: number; trim: number }>('historyProgress', ({ samples, trim }) => {
+        setSyncStatus(s => ({ ...s, lastFrames: samples, log: pushLog(s.log, `chunk acked · ${samples} frames so far (trim ${trim})`) }));
+      }),
+      client.on<{ samples: number }>('historyComplete', ({ samples }) => {
+        setSyncStatus(s => ({ ...s, state: 'done', lastFrames: samples, lastSyncAt: Date.now(), log: pushLog(s.log, `COMPLETE · ${samples} frames this drain`) }));
+        rollupAllDays().then(refreshSyncCounts).catch(() => {});
+      }),
+      client.on<Error>('historyError', (e) => {
+        const msg = e?.message ?? String(e);
+        setSyncStatus(s => ({ ...s, state: 'error', lastError: msg, log: pushLog(s.log, `ERROR · ${msg}`) }));
+        refreshSyncCounts();
+      }),
+      client.on<{ startUnix: number; endUnix: number }>('dataRange', (r) => {
+        setSyncStatus(s => ({ ...s, strapRange: r }));
+      }),
+      client.on<string>('log', (text) => {
+        setSyncStatus(s => ({ ...s, log: pushLog(s.log, text) }));
       }),
 
       client.on<number>('battery', setBattery),
     ];
+    refreshSyncCounts();
     return () => { off.forEach(fn => fn()); client.destroy(); };
-  }, []);
+  }, [refreshSyncCounts]);
 
   // Seed HRV + mark session start when BLE connects
   useEffect(() => {
@@ -128,5 +184,18 @@ export function useBLE() {
   const scan = useCallback(() => clientRef.current?.scan(), []);
   const disconnect = useCallback(() => clientRef.current?.disconnect(), []);
 
-  return { state, heartRate, rr, battery, hrv, hrBuffer60, sessionStartUnix, calories, scan, disconnect };
+  // Manually kick a flash drain (Settings → "Sync history now"): refresh the strap's data range,
+  // then request the historical offload. Surfaces everything through syncStatus for diagnosis.
+  const syncNow = useCallback(async () => {
+    const c = clientRef.current;
+    if (!c) return;
+    setSyncStatus(s => ({ ...s, log: [...s.log.slice(-(SYNC_LOG_MAX - 1)), `${hhmmss(Date.now())}  manual sync requested`] }));
+    try { await c.getDataRange(); } catch {}
+    try { await c.downloadHistory(); } catch {}
+  }, []);
+
+  return {
+    state, heartRate, rr, battery, hrv, hrBuffer60, sessionStartUnix, calories, scan, disconnect,
+    syncStatus, syncNow, refreshSyncCounts,
+  };
 }

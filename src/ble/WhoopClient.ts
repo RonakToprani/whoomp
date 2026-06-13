@@ -6,7 +6,7 @@ import {
 } from './protocol';
 import {
   decodePacket, parseHistorical, parseBatteryResponse, parseClockResponse,
-  parseHelloResponse, MetadataResult,
+  parseHelloResponse, parseDataRangeResponse, MetadataResult,
 } from './parser';
 
 const RECONNECT_INITIAL_MS = 1000;
@@ -14,6 +14,10 @@ const RECONNECT_MAX_MS = 30000;
 const BATTERY_POLL_MS = 60000;
 const RTC_DRIFT_THRESHOLD_S = 5;
 const META_QUEUE_TIMEOUT_MS = 30000;
+// Re-offload the strap's flash store on a timer while connected (mirrors NOOP/WHOOP, which re-sync
+// the 14-day biometric store every ~15 min rather than once per connect). Without this, a single
+// failed/empty connect-time drain is never retried for the life of the connection.
+const BACKFILL_INTERVAL_MS = 5 * 60_000;
 
 function bytesToB64(bytes: Uint8Array): string {
   let binary = '';
@@ -89,12 +93,17 @@ export class WhoopClient {
   private _historicalDumpInFlight = false;
   private _state: ClientState = 'disconnected';
   private _subs: Subscription[] = [];
+  private _backfillTimer: ReturnType<typeof setInterval> | null = null;
 
   charging: boolean | null = null;
   isWorn: boolean | null = null;
   serial: string | null = null;
   batteryPct: number | null = null;
   lastClockUnix: number | null = null;
+  // Strap's stored-data range from GET_DATA_RANGE (unix seconds). If this is empty/tiny while the
+  // DB has no historical samples, the strap has nothing to give (e.g. the official WHOOP app drained
+  // + trimmed the flash); if it spans days but no samples arrive, the drain itself is failing.
+  dataRange: { startUnix: number; endUnix: number } | null = null;
 
   on<T>(event: string, fn: (p: T) => void): () => void {
     return this._emitter.on(event, fn);
@@ -127,6 +136,7 @@ export class WhoopClient {
     this._subs.forEach(s => { try { s.remove(); } catch {} });
     this._subs = [];
     if (this._batteryPollInterval) { clearInterval(this._batteryPollInterval); this._batteryPollInterval = null; }
+    if (this._backfillTimer) { clearInterval(this._backfillTimer); this._backfillTimer = null; }
   }
 
   async scan(): Promise<void> {
@@ -224,7 +234,14 @@ export class WhoopClient {
         try { pkt = WhoopPacket.fromData(bytes); }
         catch { return; }
 
-        if (pkt.cmd === CommandNumber.GET_BATTERY_LEVEL) {
+        if (pkt.cmd === CommandNumber.GET_DATA_RANGE) {
+          const range = parseDataRangeResponse(pkt.data);
+          if (range) {
+            this.dataRange = range;
+            this._emit('dataRange', range);
+            this._emit('log', `strap data range: ${new Date(range.startUnix * 1000).toISOString()} → ${new Date(range.endUnix * 1000).toISOString()}`);
+          }
+        } else if (pkt.cmd === CommandNumber.GET_BATTERY_LEVEL) {
           const pct = parseBatteryResponse(pkt.data);
           if (pct != null) { this.batteryPct = pct; this._emit('battery', pct); }
         } else if (pkt.cmd === CommandNumber.GET_CLOCK) {
@@ -276,6 +293,9 @@ export class WhoopClient {
 
     this._postConnectFlow().catch(err => this._emit('error', err));
     this._batteryPollInterval = setInterval(() => this.getBatteryLevel(), BATTERY_POLL_MS);
+    // Periodically re-drain the flash store so a single failed/empty connect-time offload is retried
+    // for the life of the connection (the strap keeps logging; we keep pulling).
+    this._backfillTimer = setInterval(() => { this.downloadHistory().catch(() => {}); }, BACKFILL_INTERVAL_MS);
     this._connecting = false;
   }
 
@@ -289,6 +309,11 @@ export class WhoopClient {
         await this.setClock();
       }
     } catch (e) { this._emit('error', e); }
+
+    // Ask the strap what it has stored before draining — distinguishes "nothing to give" (empty
+    // range, e.g. the official WHOOP app trimmed the flash) from "drain is failing" (range spans
+    // days but no frames arrive). Surfaced in the Settings sync panel.
+    try { await this.getDataRange(); } catch (e) { this._emit('error', e); }
 
     try { await this.downloadHistory(); } catch (e) { this._emit('error', e); }
 
@@ -381,7 +406,25 @@ export class WhoopClient {
         resolve(unix);
       });
       setTimeout(() => { if (!resolved) { dispose(); resolve(null); } }, 3000);
-      await this._sendCommand(CommandNumber.GET_CLOCK, new Uint8Array([0x00]));
+      // The strap expects GET_CLOCK with an EMPTY payload (per NOOP); a [0x00] payload is rejected.
+      await this._sendCommand(CommandNumber.GET_CLOCK, new Uint8Array());
+    });
+  }
+
+  // Query the strap's stored-data range (GET_DATA_RANGE). Resolves with the range or null on timeout.
+  async getDataRange(): Promise<{ startUnix: number; endUnix: number } | null> {
+    if (!this._connected) return null;
+    return new Promise(async (resolve) => {
+      let resolved = false;
+      const dispose = this.on<{ startUnix: number; endUnix: number }>('dataRange', (range) => {
+        if (resolved) return;
+        resolved = true;
+        dispose();
+        resolve(range);
+      });
+      setTimeout(() => { if (!resolved) { dispose(); resolve(null); } }, 3000);
+      try { await this._sendCommand(CommandNumber.GET_DATA_RANGE, new Uint8Array()); }
+      catch { if (!resolved) { resolved = true; dispose(); resolve(null); } }
     });
   }
 
