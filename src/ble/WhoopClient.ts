@@ -303,10 +303,21 @@ export class WhoopClient {
     try { await this.sendHello(); } catch (e) { this._emit('error', e); }
 
     try {
+      // ALWAYS set the strap RTC on connect — unconditionally, before anything else.
+      // A strap with a lost/relative clock does NOT bank timestamped sensor history; it only emits
+      // console diagnostics, so the historical drain returns 0 frames (NOOP's "console-only /
+      // clock-lost" state — the on-device symptom we saw). The old code set the clock only when
+      // GET_CLOCK succeeded AND drift > 5s, so a GET_CLOCK timeout silently skipped it and the strap
+      // never got a valid RTC. Set first, then read back for diagnostics.
+      await this.setClock();
       const strapUnix = await this.getClock();
-      const hostUnix = Math.floor(Date.now() / 1000);
-      if (strapUnix && Math.abs(hostUnix - strapUnix) > RTC_DRIFT_THRESHOLD_S) {
-        await this.setClock();
+      if (strapUnix) {
+        this.lastClockUnix = strapUnix;
+        const drift = Math.abs(Math.floor(Date.now() / 1000) - strapUnix);
+        this._emit('log', `clock set · strap now ${new Date(strapUnix * 1000).toISOString()} (drift ${drift}s)`);
+        if (drift > RTC_DRIFT_THRESHOLD_S) await this.setClock(); // re-assert if the read still drifts
+      } else {
+        this._emit('log', 'clock set (GET_CLOCK returned no value)');
       }
     } catch (e) { this._emit('error', e); }
 

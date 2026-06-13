@@ -18,13 +18,14 @@ export interface SyncStatus {
   withGravity: number;         // DB samples carrying gravity
   strapRange: { startUnix: number; endUnix: number } | null; // GET_DATA_RANGE (what the strap has)
   histRange: { minUnix: number; maxUnix: number } | null;    // span of historical data in the DB
+  consoleOnlyStreak: number; // consecutive drains that completed with 0 sensor frames (NOOP's clock-lost signal)
   lastError: string | null;
   log: string[];
 }
 
 const INITIAL_SYNC: SyncStatus = {
   state: 'idle', lastSyncAt: null, lastFrames: null, realtime: 0, historical: 0,
-  withGravity: 0, strapRange: null, histRange: null, lastError: null, log: [],
+  withGravity: 0, strapRange: null, histRange: null, consoleOnlyStreak: 0, lastError: null, log: [],
 };
 
 function hhmmss(ms: number): string {
@@ -138,7 +139,11 @@ export function useBLE() {
         setSyncStatus(s => ({ ...s, lastFrames: samples, log: pushLog(s.log, `chunk acked · ${samples} frames so far (trim ${trim})`) }));
       }),
       client.on<{ samples: number }>('historyComplete', ({ samples }) => {
-        setSyncStatus(s => ({ ...s, state: 'done', lastFrames: samples, lastSyncAt: Date.now(), log: pushLog(s.log, `COMPLETE · ${samples} frames this drain`) }));
+        setSyncStatus(s => ({
+          ...s, state: 'done', lastFrames: samples, lastSyncAt: Date.now(),
+          consoleOnlyStreak: samples === 0 ? s.consoleOnlyStreak + 1 : 0,
+          log: pushLog(s.log, `COMPLETE · ${samples} frames this drain`),
+        }));
         rollupAllDays().then(refreshSyncCounts).catch(() => {});
       }),
       client.on<Error>('historyError', (e) => {

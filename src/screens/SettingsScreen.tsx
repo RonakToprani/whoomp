@@ -14,7 +14,7 @@ const WRIST_KEY = '@whoomp/wrist';
 
 // Visible build marker — bump on every install so a new build is confirmable at a glance
 // (the app has no other version cue and same-version reinstalls look identical).
-const BUILD_TAG = 'build 3 · flash-drain sync + diagnostics';
+const BUILD_TAG = 'build 4 · RTC clock fix + drain diagnostics';
 
 function fmtClock(unix: number): string {
   const d = new Date(unix * 1000);
@@ -198,6 +198,15 @@ export default function SettingsScreen() {
         <SyncRow k="Last drain" v={`${fmtAgo(syncStatus.lastSyncAt)}${syncStatus.lastFrames != null ? ` · ${syncStatus.lastFrames} frames` : ''}`} />
         {syncStatus.lastError ? <Text style={styles.syncErr}>⚠ {syncStatus.lastError}</Text> : null}
 
+        {syncStatus.consoleOnlyStreak >= 2 && syncStatus.historical === 0 ? (
+          <Text style={styles.syncWarn}>
+            Strap is returning diagnostics but no banked sensor history ({syncStatus.consoleOnlyStreak}× in a row).
+            That means its clock was lost or the official WHOOP app is draining + trimming the flash. The clock is
+            now re-set on every connect — fully close/delete the WHOOP app, keep whoomp connected, and historical
+            data should start banking within ~15 min.
+          </Text>
+        ) : null}
+
         <TouchableOpacity
           style={[styles.outlineBtn, { marginTop: 12 }, state !== 'connected' && styles.btnDisabled]}
           onPress={() => syncNow()} disabled={state !== 'connected'}>
@@ -248,6 +257,7 @@ const styles = StyleSheet.create({
   syncVal: { fontSize: 13, color: colors.text, fontWeight: '600', flexShrink: 1, marginLeft: 12, textAlign: 'right' },
   syncBad: { color: colors.red },
   syncErr: { fontSize: 12, color: colors.red, marginTop: spacing.sm },
+  syncWarn: { fontSize: 12, color: colors.yellow, marginTop: spacing.md, lineHeight: 17 },
   logBox: { marginTop: spacing.md, backgroundColor: colors.surfaceAlt, borderRadius: radii.sm, padding: spacing.sm },
   logLine: { fontSize: 10, color: colors.textDim, fontFamily: 'Courier', lineHeight: 14 },
 });

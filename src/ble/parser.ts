@@ -221,12 +221,23 @@ export function parseClockResponse(data: Uint8Array): number | null {
   return u32le(data, 2);
 }
 
+// Newest/oldest stored-record unix from a GET_DATA_RANGE response. The exact field layout varies, so
+// (mirroring NOOP's dataRangeNewestUnix / openwhoop's diagnose) we scan every u32 LE word and keep
+// those in the plausible unix range — the strap's stored span = [min, max] of those. null when NONE
+// are found, which itself signals the strap has no unix-timestamped data banked (a lost RTC clock).
+const MIN_PLAUSIBLE_UNIX = 1_700_000_000; // ~2023-11
+const MAX_PLAUSIBLE_UNIX = 1_900_000_000; // ~2030-03
 export function parseDataRangeResponse(data: Uint8Array): { startUnix: number; endUnix: number } | null {
-  if (data.length < 10) return null;
-  return {
-    startUnix: u32le(data, 2),
-    endUnix:   u32le(data, 6),
-  };
+  let lo = Infinity, hi = -Infinity, found = false;
+  for (let i = 0; i + 4 <= data.length; i++) { // byte-aligned: word offset within the body is unknown
+    const w = u32le(data, i);
+    if (w >= MIN_PLAUSIBLE_UNIX && w <= MAX_PLAUSIBLE_UNIX) {
+      found = true;
+      if (w < lo) lo = w;
+      if (w > hi) hi = w;
+    }
+  }
+  return found ? { startUnix: lo, endUnix: hi } : null;
 }
 
 export function parseHelloResponse(data: Uint8Array): { charging: boolean; isWorn: boolean; serial: string | null; raw: Uint8Array; partial?: boolean } {
