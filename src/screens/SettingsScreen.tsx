@@ -14,7 +14,7 @@ const WRIST_KEY = '@whoomp/wrist';
 
 // Visible build marker — bump on every install so a new build is confirmable at a glance
 // (the app has no other version cue and same-version reinstalls look identical).
-const BUILD_TAG = 'build 4 · RTC clock fix + drain diagnostics';
+const BUILD_TAG = 'build 5 · strap-RTC readback + multi-format clock set';
 
 function fmtClock(unix: number): string {
   const d = new Date(unix * 1000);
@@ -191,6 +191,15 @@ export default function SettingsScreen() {
           hasn't drained — close the official WHOOP app first (it holds the strap's single BLE link).
         </Text>
         <SyncRow k="State" v={syncStatus.state === 'syncing' ? 'syncing…' : syncStatus.state} />
+        <SyncRow
+          k="Strap RTC"
+          v={syncStatus.strapRtc
+            ? (syncStatus.strapRtc.valid
+                ? `VALID ${fmtClock(syncStatus.strapRtc.raw)}`
+                : `INVALID (${syncStatus.strapRtc.raw})${syncStatus.strapRtc.savingBlocked ? ' · not banking' : ''}`)
+            : '— (connect & wait)'}
+          bad={syncStatus.strapRtc != null && !syncStatus.strapRtc.valid}
+        />
         <SyncRow k="Strap has" v={syncStatus.strapRange ? `${fmtClock(syncStatus.strapRange.startUnix)} → ${fmtClock(syncStatus.strapRange.endUnix)}` : '—'} />
         <SyncRow k="Historical in DB" v={`${syncStatus.historical.toLocaleString()}${syncStatus.histRange ? `  (${fmtClock(syncStatus.histRange.minUnix)}→${fmtClock(syncStatus.histRange.maxUnix)})` : ''}`} bad={syncStatus.historical === 0} />
         <SyncRow k="With gravity" v={syncStatus.withGravity.toLocaleString()} bad={syncStatus.withGravity === 0} />

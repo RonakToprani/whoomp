@@ -19,13 +19,14 @@ export interface SyncStatus {
   strapRange: { startUnix: number; endUnix: number } | null; // GET_DATA_RANGE (what the strap has)
   histRange: { minUnix: number; maxUnix: number } | null;    // span of historical data in the DB
   consoleOnlyStreak: number; // consecutive drains that completed with 0 sensor frames (NOOP's clock-lost signal)
+  strapRtc: { raw: number; valid: boolean; savingBlocked: boolean } | null; // strap RTC scraped from console logs
   lastError: string | null;
   log: string[];
 }
 
 const INITIAL_SYNC: SyncStatus = {
   state: 'idle', lastSyncAt: null, lastFrames: null, realtime: 0, historical: 0,
-  withGravity: 0, strapRange: null, histRange: null, consoleOnlyStreak: 0, lastError: null, log: [],
+  withGravity: 0, strapRange: null, histRange: null, consoleOnlyStreak: 0, strapRtc: null, lastError: null, log: [],
 };
 
 function hhmmss(ms: number): string {
@@ -153,6 +154,9 @@ export function useBLE() {
       }),
       client.on<{ startUnix: number; endUnix: number }>('dataRange', (r) => {
         setSyncStatus(s => ({ ...s, strapRange: r }));
+      }),
+      client.on<{ raw: number; valid: boolean; savingBlocked: boolean }>('strapRtc', (rtc) => {
+        setSyncStatus(s => ({ ...s, strapRtc: rtc }));
       }),
       client.on<string>('log', (text) => {
         setSyncStatus(s => ({ ...s, log: pushLog(s.log, text) }));

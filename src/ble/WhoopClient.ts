@@ -104,6 +104,11 @@ export class WhoopClient {
   // DB has no historical samples, the strap has nothing to give (e.g. the official WHOOP app drained
   // + trimmed the flash); if it spans days but no samples arrive, the drain itself is failing.
   dataRange: { startUnix: number; endUnix: number } | null = null;
+  // The strap's own RTC value + flash-banking state, scraped from its console-log stream
+  // ("Flash: RTC timestamp <n> is invalid; not saving data to flash"). This is the definitive
+  // read of whether the clock is valid — independent of GET_CLOCK (which this strap ignores).
+  strapRtc: { raw: number; valid: boolean; savingBlocked: boolean } | null = null;
+  private _consoleBuf = '';
 
   on<T>(event: string, fn: (p: T) => void): () => void {
     return this._emitter.on(event, fn);
@@ -212,7 +217,10 @@ export class WhoopClient {
           }
           case PacketType.CONSOLE_LOGS: {
             const decoded = decodePacket(pkt);
-            if (decoded.type === 'consoleLog' && decoded.text) this._emit('log', decoded.text);
+            if (decoded.type === 'consoleLog' && decoded.text) {
+              this._emit('log', decoded.text);
+              this._scanConsoleForRtc(decoded.text);
+            }
             break;
           }
           case PacketType.REALTIME_RAW_DATA:
@@ -309,15 +317,14 @@ export class WhoopClient {
       // clock-lost" state — the on-device symptom we saw). The old code set the clock only when
       // GET_CLOCK succeeded AND drift > 5s, so a GET_CLOCK timeout silently skipped it and the strap
       // never got a valid RTC. Set first, then read back for diagnostics.
-      await this.setClock();
+      await this.forceSetClock();
       const strapUnix = await this.getClock();
       if (strapUnix) {
         this.lastClockUnix = strapUnix;
         const drift = Math.abs(Math.floor(Date.now() / 1000) - strapUnix);
-        this._emit('log', `clock set · strap now ${new Date(strapUnix * 1000).toISOString()} (drift ${drift}s)`);
-        if (drift > RTC_DRIFT_THRESHOLD_S) await this.setClock(); // re-assert if the read still drifts
+        this._emit('log', `clock set · GET_CLOCK→ ${new Date(strapUnix * 1000).toISOString()} (drift ${drift}s)`);
       } else {
-        this._emit('log', 'clock set (GET_CLOCK returned no value)');
+        this._emit('log', 'clock set ×3 (GET_CLOCK no reply — watching strap RTC in console)');
       }
     } catch (e) { this._emit('error', e); }
 
@@ -446,6 +453,53 @@ export class WhoopClient {
     buf[2] = (unix >>> 16) & 0xff;
     buf[3] = (unix >>> 24) & 0xff;
     await this._sendCommand(CommandNumber.SET_CLOCK, buf);
+  }
+
+  // Fire SET_CLOCK the no-response way too (gowhoop writes ALL commands without response).
+  private async _setClockNoResp(unix: number, padTo9: boolean): Promise<void> {
+    if (!this._device || !this._connected) return;
+    const data = new Uint8Array(padTo9 ? 9 : 4);
+    data[0] = unix & 0xff; data[1] = (unix >>> 8) & 0xff; data[2] = (unix >>> 16) & 0xff; data[3] = (unix >>> 24) & 0xff;
+    const frame = buildCommandFrame(CommandNumber.SET_CLOCK, data, this._seq);
+    this._seq = (this._seq + 1) & 0xff;
+    try {
+      await this._device.writeCharacteristicWithoutResponseForService(
+        SERVICES.WHOOP, CHARACTERISTICS.CMD_TO_STRAP, bytesToB64(frame),
+      );
+    } catch { /* best-effort */ }
+  }
+
+  // A lost-RTC strap refuses to bank sensor history ("Flash: RTC timestamp … invalid; not saving
+  // data to flash"). The canonical 4-byte SET_CLOCK that whoof/whoomp send isn't recovering it, so
+  // try every known form — 4-byte and 9-byte-padded (gowhoop), with- and without-response — a few
+  // times. Whichever the firmware accepts wins; the strap-RTC readback (from its console logs) tells
+  // us if any of them stuck.
+  async forceSetClock(): Promise<void> {
+    for (let i = 0; i < 3; i++) {
+      const unix = Math.floor(Date.now() / 1000);
+      try { await this.setClock(unix); } catch {}
+      await this._setClockNoResp(unix, false);
+      await this._setClockNoResp(unix, true);
+      await new Promise(r => setTimeout(r, 250));
+    }
+  }
+
+  // Reassemble fragmented console-log chunks (BLE splits the strap's text mid-word/mid-number) and
+  // extract its RTC value + whether it's blocking flash writes. Definitive clock read for the panel.
+  private _scanConsoleForRtc(text: string): void {
+    this._consoleBuf = (this._consoleBuf + text).slice(-2000); // no separator: numbers split across chunks must rejoin
+    const m = this._consoleBuf.match(/RTC timestamp\s*(\d{5,})/);
+    const savingBlocked = /not saving data to flash/i.test(this._consoleBuf);
+    if (m) {
+      const raw = parseInt(m[1], 10);
+      const valid = raw > 1_500_000_000 && raw < 2_500_000_000; // plausible unix seconds (2017–2049)
+      const prev = this.strapRtc;
+      this.strapRtc = { raw, valid, savingBlocked };
+      if (!prev || prev.raw !== raw || prev.valid !== valid || prev.savingBlocked !== savingBlocked) {
+        this._emit('strapRtc', this.strapRtc);
+        this._emit('log', `strap RTC = ${raw} ${valid ? `VALID (${new Date(raw * 1000).toISOString().slice(0, 19)})` : 'INVALID'}${savingBlocked ? ' · NOT banking' : ''}`);
+      }
+    }
   }
 
   async downloadHistory(): Promise<{ samples: number; alreadyRunning?: boolean }> {
