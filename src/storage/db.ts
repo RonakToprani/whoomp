@@ -129,6 +129,13 @@ export async function getDb(): Promise<SQLite.SQLiteDatabase> {
     await _db.execAsync('INSERT OR IGNORE INTO schema_version (v) VALUES (6)');
   }
 
+  if (version < 7) {
+    // Sleep-stage classifier was re-tuned against Fitbit ground truth (deep/REM no longer collapse
+    // into Light). Rebuild the derived daily table so every night re-stages with the new thresholds.
+    await _db.execAsync('DELETE FROM daily');
+    await _db.execAsync('INSERT OR IGNORE INTO schema_version (v) VALUES (7)');
+  }
+
   return _db;
 }
 

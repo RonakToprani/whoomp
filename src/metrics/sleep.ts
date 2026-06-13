@@ -65,17 +65,26 @@ const CK_COUNT_CLIP = 300;
 const MOVE_DELTA_THRESHOLD_G = 0.01;
 const HR_DOG_SIGMA1_S = 120;
 const HR_DOG_SIGMA2_S = 600;
-const STAGE_HR_LOW_PCT = 25;
-const STAGE_HR_HIGH_PCT = 70;
-const STAGE_HRV_HIGH_PCT = 70;
-const STAGE_HRVAR_HIGH_PCT = 65;
-const STAGE_RRV_HIGH_PCT = 65;
-const STAGE_RRV_LOW_PCT = 50;
+// Stage-classifier percentile bands. NOOP's originals (25/70/70/65/65/50) gated deep+REM so
+// tightly that on a real WHOOP 4.0 gravity night they collapsed into Light (deep 18m / rem 55m vs
+// a Fitbit-confirmed 73m / 84m for the same night). Loosened here against that ground truth:
+// widen the low-HR + high-HR bands and lower the parasympathetic/RRV bars so the deep/REM
+// signatures actually fire. Tuned on one night — re-check as more paired nights accumulate.
+const STAGE_HR_LOW_PCT = 38;
+const STAGE_HR_HIGH_PCT = 62;
+const STAGE_HRV_HIGH_PCT = 50;
+const STAGE_HRVAR_HIGH_PCT = 60;
+const STAGE_RRV_HIGH_PCT = 55;
+const STAGE_RRV_LOW_PCT = 55;
 const STAGE_WAKE_MOVE_FRAC = 0.15;
 const STAGE_STILL_MOVE_FRAC = 0.1;
 const SMOOTH_EPOCHS = 5;
 const NO_REM_AFTER_ONSET_MIN = 15;
-const DEEP_FIRST_FRACTION = 1 / 3;
+// Deep is allowed across the first DEEP_FIRST_FRACTION of the night and trimmed only in the final
+// stretch (pre-wake deep is implausible — you surface through light/REM). NOOP's strict 1/3 was the
+// main bug: it zeroed real deep that occurs throughout the night (deep 0–18m on full nights). 0.9
+// keeps a mild pre-wake guard while letting the feature gate place deep where it actually is.
+const DEEP_FIRST_FRACTION = 0.9;
 // te Lindert 30 s Cole–Kripke weights [A₋₄..A₊₂]. SI = 0.001·Σ wᵢ·Aᵢ; sleep iff SI<1.
 const CK_WEIGHTS = [106, 54, 58, 76, 230, 74, 67];
 const CK_SCALE = 0.001;

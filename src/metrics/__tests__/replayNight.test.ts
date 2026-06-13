@@ -108,7 +108,7 @@ RUN('replay night', () => {
     // Detect + per-session staging split.
     const sessions = detectSleep({ hr, rr, resp, gravity });
     console.log(`\n===== ${sessions.length} SESSION(S) =====`);
-    const FITBIT = { deep: 79, rem: 131, light: 237, wake: 3, total: 448 };
+    const FITBIT = { deep: 73, rem: 84, light: 269, wake: 17, total: 426 }; // 6/13 night (2:23–9:47)
     let aggDeep = 0, aggRem = 0, aggLight = 0, aggWake = 0;
     for (const s of sessions) {
       const t = { wake: 0, light: 0, deep: 0, rem: 0 } as Record<string, number>;
