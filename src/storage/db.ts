@@ -4,7 +4,16 @@ import { recoveryBreakdown } from '../metrics/recovery';
 import { foldHistory, hrvCfg, restingHrCfg, respCfg } from '../metrics/baselines';
 import { analyzeNightSummary, type HRSample, type RRInterval, type RespSample, type GravitySample } from '../metrics/sleep';
 import { caloriesFromHrSeries } from '../metrics/zones';
+import { meanSkinTempC } from '../metrics/skinTemp';
+import { sleepNeed } from '../metrics/sleepNeed';
 import { getProfile, type UserProfile } from './settings';
+
+function median(xs: number[]): number | null {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+}
 
 let _db: SQLite.SQLiteDatabase | null = null;
 
@@ -136,6 +145,20 @@ export async function getDb(): Promise<SQLite.SQLiteDatabase> {
     await _db.execAsync('INSERT OR IGNORE INTO schema_version (v) VALUES (7)');
   }
 
+  if (version < 8) {
+    // Richer sleep detail + skin temp for the redesigned UI. skin_temp_raw / spo2 were already stored
+    // per-sample (schema v4); add the derived daily columns and re-roll every night so they populate
+    // from the preserved samples.
+    for (const col of [
+      'skin_temp_c REAL', 'lowest_hr REAL', 'sleep_onset_unix INTEGER',
+      'sleep_wake_unix INTEGER', 'sleep_need_min INTEGER', 'spo2_ratio REAL',
+    ]) {
+      try { await _db.execAsync(`ALTER TABLE daily ADD COLUMN ${col}`); } catch {}
+    }
+    await _db.execAsync('DELETE FROM daily');
+    await _db.execAsync('INSERT OR IGNORE INTO schema_version (v) VALUES (8)');
+  }
+
   return _db;
 }
 
@@ -203,14 +226,21 @@ export interface DailyRow {
   rhr_spread?: number | null;
   recovery_state?: string | null;
   sleep_stages?: string | null; // JSON [{start,end,stage}] for the hypnogram
+  skin_temp_c?: number | null;       // mean skin temp during sleep (°C)
+  lowest_hr?: number | null;         // single lowest HR during the sleep window
+  sleep_onset_unix?: number | null;  // first non-wake stage start
+  sleep_wake_unix?: number | null;   // last non-wake stage end
+  sleep_need_min?: number | null;    // modeled sleep need (baseline+debt+strain)
+  spo2_ratio?: number | null;        // nightly median IR/red — relative blood-O₂ index (uncalibrated)
 }
 
 export async function upsertDaily(row: DailyRow): Promise<void> {
   const db = await getDb();
   await db.runAsync(
     `INSERT INTO daily (date, rmssd, rhr, strain, sleep_minutes, recovery, calories, deep_min, rem_min, light_min, awake_min,
-                        resp_rate, sleep_efficiency, hrv_baseline, hrv_spread, rhr_baseline, rhr_spread, recovery_state, sleep_stages)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        resp_rate, sleep_efficiency, hrv_baseline, hrv_spread, rhr_baseline, rhr_spread, recovery_state, sleep_stages,
+                        skin_temp_c, lowest_hr, sleep_onset_unix, sleep_wake_unix, sleep_need_min, spo2_ratio)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(date) DO UPDATE SET
        rmssd = excluded.rmssd,
        rhr = excluded.rhr,
@@ -229,13 +259,22 @@ export async function upsertDaily(row: DailyRow): Promise<void> {
        rhr_baseline = excluded.rhr_baseline,
        rhr_spread = excluded.rhr_spread,
        recovery_state = excluded.recovery_state,
-       sleep_stages = excluded.sleep_stages`,
+       sleep_stages = excluded.sleep_stages,
+       skin_temp_c = excluded.skin_temp_c,
+       lowest_hr = excluded.lowest_hr,
+       sleep_onset_unix = excluded.sleep_onset_unix,
+       sleep_wake_unix = excluded.sleep_wake_unix,
+       sleep_need_min = excluded.sleep_need_min,
+       spo2_ratio = excluded.spo2_ratio`,
     row.date, row.rmssd, row.rhr, row.strain, row.sleep_minutes, row.recovery, row.calories,
     row.deep_min, row.rem_min, row.light_min, row.awake_min,
     row.resp_rate ?? null, row.sleep_efficiency ?? null,
     row.hrv_baseline ?? null, row.hrv_spread ?? null,
     row.rhr_baseline ?? null, row.rhr_spread ?? null,
     row.recovery_state ?? null, row.sleep_stages ?? null,
+    row.skin_temp_c ?? null, row.lowest_hr ?? null,
+    row.sleep_onset_unix ?? null, row.sleep_wake_unix ?? null,
+    row.sleep_need_min ?? null, row.spo2_ratio ?? null,
   );
 }
 
@@ -305,8 +344,9 @@ export async function rollupDay(dateStr?: string, profileArg?: UserProfile): Pro
   const nightRows = await db.getAllAsync<{
     unix: number; hr: number | null; rr_json: string | null;
     gx: number | null; gy: number | null; gz: number | null; resp_raw: number | null;
+    skin_temp_raw: number | null; spo2_red: number | null; spo2_ir: number | null;
   }>(
-    'SELECT unix, hr, rr_json, gx, gy, gz, resp_raw FROM samples WHERE unix >= ? AND unix < ? ORDER BY unix ASC',
+    'SELECT unix, hr, rr_json, gx, gy, gz, resp_raw, skin_temp_raw, spo2_red, spo2_ir FROM samples WHERE unix >= ? AND unix < ? ORDER BY unix ASC',
     nightStart, nightEnd,
   );
 
@@ -314,11 +354,15 @@ export async function rollupDay(dateStr?: string, profileArg?: UserProfile): Pro
   const rrN: RRInterval[] = [];
   const respN: RespSample[] = [];
   const gravN: GravitySample[] = [];
+  const skinN: { ts: number; raw: number }[] = [];
+  const spo2N: { ts: number; ratio: number }[] = [];
   for (const r of nightRows) {
     if (r.hr != null && r.hr >= 20 && r.hr <= 250) hrN.push({ ts: r.unix, bpm: r.hr });
     if (r.rr_json) for (const v of JSON.parse(r.rr_json) as number[]) rrN.push({ ts: r.unix, rrMs: v });
     if (r.resp_raw != null) respN.push({ ts: r.unix, raw: r.resp_raw });
     if (r.gx != null && r.gy != null && r.gz != null) gravN.push({ ts: r.unix, x: r.gx, y: r.gy, z: r.gz });
+    if (r.skin_temp_raw != null) skinN.push({ ts: r.unix, raw: r.skin_temp_raw });
+    if (r.spo2_red != null && r.spo2_ir != null && r.spo2_red > 0) spo2N.push({ ts: r.unix, ratio: r.spo2_ir / r.spo2_red });
   }
   // Local UTC offset for the daytime-nap guard (positive east of UTC).
   if (dayRows.length === 0 && nightRows.length === 0) return; // nothing to roll up
@@ -342,6 +386,20 @@ export async function rollupDay(dateStr?: string, profileArg?: UserProfile): Pro
     sleep_minutes = night.asleepMin > 0 ? night.asleepMin : Math.round((night.end - night.start) / 60);
   }
 
+  // ── Sleep detail for the redesigned Sleep UI: onset/wake clock, skin temp, lowest HR, blood-O₂ ──
+  let skin_temp_c: number | null = null, lowest_hr: number | null = null;
+  let sleep_onset_unix: number | null = null, sleep_wake_unix: number | null = null, spo2_ratio: number | null = null;
+  if (night) {
+    const asleepSegs = night.stages.filter(s => s.stage !== 'wake');
+    sleep_onset_unix = asleepSegs.length ? asleepSegs[0].start : night.start;
+    sleep_wake_unix = asleepSegs.length ? asleepSegs[asleepSegs.length - 1].end : night.end;
+    const inSpan = <T extends { ts: number }>(x: T) => x.ts >= night.start && x.ts <= night.end;
+    skin_temp_c = meanSkinTempC(skinN.filter(inSpan).map(s => s.raw));
+    const sleepHr = hrN.filter(inSpan).map(h => h.bpm);
+    lowest_hr = sleepHr.length ? Math.min(...sleepHr) : null;
+    spo2_ratio = median(spo2N.filter(inSpan).map(s => s.ratio));
+  }
+
   // ── Personalized HRmax: observed 99.5th-pct over the trailing 30 days, else Tanaka (≈191 @ age 24) ──
   const tanaka = tanakaHRmax(profile.age);
   const observed = await observedHrMaxP995(db, endUnix - 30 * 86400);
@@ -356,8 +414,8 @@ export async function rollupDay(dateStr?: string, profileArg?: UserProfile): Pro
     : null;
 
   // ── Baselines folded from PRIOR nights only (causal) → recovery vs personal baseline ──
-  const prior = await db.getAllAsync<{ rmssd: number | null; rhr: number | null; resp_rate: number | null }>(
-    'SELECT rmssd, rhr, resp_rate FROM daily WHERE date < ? ORDER BY date ASC',
+  const prior = await db.getAllAsync<{ rmssd: number | null; rhr: number | null; resp_rate: number | null; sleep_minutes: number | null; strain: number | null }>(
+    'SELECT rmssd, rhr, resp_rate, sleep_minutes, strain FROM daily WHERE date < ? ORDER BY date ASC',
     date,
   );
   const hrvBaseline = foldHistory(prior.map(r => r.rmssd), hrvCfg);
@@ -372,6 +430,11 @@ export async function rollupDay(dateStr?: string, profileArg?: UserProfile): Pro
     }).total;
   }
 
+  // ── Sleep need: baseline + recent debt (last 3 nights' asleep vs baseline) + prior-day strain ──
+  const recentAsleep = prior.map(r => r.sleep_minutes).filter((m): m is number => m != null).slice(-3);
+  const prevDayStrain = prior.length ? prior[prior.length - 1].strain : null;
+  const sleep_need_min = night ? sleepNeed({ recentAsleepMin: recentAsleep, dayStrain: prevDayStrain }).needMin : null;
+
   await upsertDaily({
     date, rmssd: nightlyHrv, rhr: nightlyRhr, strain, sleep_minutes, recovery, calories,
     deep_min, rem_min, light_min, awake_min,
@@ -380,6 +443,7 @@ export async function rollupDay(dateStr?: string, profileArg?: UserProfile): Pro
     rhr_baseline: rhrBaseline.baseline, rhr_spread: rhrBaseline.spread,
     recovery_state: hrvBaseline.status,
     sleep_stages: night ? JSON.stringify(night.stages) : null,
+    skin_temp_c, lowest_hr, sleep_onset_unix, sleep_wake_unix, sleep_need_min, spo2_ratio,
   });
 }
 
@@ -483,6 +547,27 @@ export async function getIntradayHr(dateStr: string, bucketMin = 10): Promise<In
   return [...sums.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([bucket, acc]) => ({ minute: bucket * bucketMin, hr: Math.round(acc.sum / acc.n) }));
+}
+
+export interface NightHrPoint { unix: number; hr: number }
+
+// Mean HR within a sleep window, bucketed (default ~90s), for the Sleep screen's sleeping-HR chart.
+// Returns absolute unix per bucket so the caller can align the HR line with the stage bands on one axis.
+export async function getNightHr(startUnix: number, endUnix: number, bucketSec = 90): Promise<NightHrPoint[]> {
+  if (!(endUnix > startUnix)) return [];
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ unix: number; hr: number }>(
+    'SELECT unix, hr FROM samples WHERE unix >= ? AND unix <= ? AND hr IS NOT NULL AND hr >= 25 AND hr <= 220 ORDER BY unix ASC',
+    startUnix, endUnix,
+  );
+  const sums = new Map<number, { sum: number; n: number }>();
+  for (const r of rows) {
+    const b = Math.floor((r.unix - startUnix) / bucketSec);
+    const acc = sums.get(b) ?? { sum: 0, n: 0 };
+    acc.sum += r.hr; acc.n += 1; sums.set(b, acc);
+  }
+  return [...sums.entries()].sort((a, b) => a[0] - b[0])
+    .map(([b, acc]) => ({ unix: startUnix + b * bucketSec, hr: Math.round(acc.sum / acc.n) }));
 }
 
 export interface ExportSampleRow {

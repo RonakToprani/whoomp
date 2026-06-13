@@ -14,7 +14,7 @@ const WRIST_KEY = '@whoomp/wrist';
 
 // Visible build marker — bump on every install so a new build is confirmable at a glance
 // (the app has no other version cue and same-version reinstalls look identical).
-const BUILD_TAG = 'build 7 · RTC auto-hold (both-form clock + keep-alive)';
+const BUILD_TAG = 'build 8 · UI overhaul (skin temp · sleep detail · colored trends)';
 
 function fmtClock(unix: number): string {
   const d = new Date(unix * 1000);

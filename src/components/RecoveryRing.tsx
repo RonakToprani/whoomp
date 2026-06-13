@@ -1,7 +1,7 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
-import Svg, { Circle } from 'react-native-svg';
-import { colors, recoveryColor } from '../theme';
+import Svg, { Circle, Defs, LinearGradient, Stop } from 'react-native-svg';
+import { colors, recoveryColor, recoveryLabel } from '../theme';
 
 interface Props {
   score: number | null;
@@ -22,17 +22,26 @@ export default function RecoveryRing({ score, size = 180, calibrating = null }: 
     : isCalibrating
       ? Math.min(1, calibrating!.n / calibrating!.seed)
       : 0;
-  const color = score != null ? recoveryColor(score) : isCalibrating ? colors.textDim : colors.textGhost;
+  const bandColor = score != null ? recoveryColor(score) : isCalibrating ? colors.textDim : colors.textGhost;
+  // Colorful WHOOP-style arc: a red→amber→green gradient when scored, solid otherwise.
+  const stroke2 = score != null ? `url(#recovGrad-${size})` : bandColor;
   const dashOffset = circumference * (1 - progress);
 
   return (
     <View style={styles.container}>
       <Svg width={size} height={size}>
+        <Defs>
+          <LinearGradient id={`recovGrad-${size}`} x1="0" y1="1" x2="1" y2="0">
+            <Stop offset="0" stopColor={colors.red} />
+            <Stop offset="0.5" stopColor={colors.yellow} />
+            <Stop offset="1" stopColor={colors.green} />
+          </LinearGradient>
+        </Defs>
         <Circle cx={cx} cy={cx} r={r} stroke={colors.surfaceAlt} strokeWidth={stroke} fill="none" />
         {progress > 0 && (
           <Circle
             cx={cx} cy={cx} r={r}
-            stroke={color} strokeWidth={stroke} fill="none"
+            stroke={stroke2} strokeWidth={stroke} fill="none"
             strokeDasharray={`${circumference} ${circumference}`}
             strokeDashoffset={dashOffset}
             strokeLinecap="round"
@@ -49,8 +58,10 @@ export default function RecoveryRing({ score, size = 180, calibrating = null }: 
           </>
         ) : (
           <>
-            <Text style={[styles.score, { color }]}>{score != null ? Math.round(score) : '--'}</Text>
-            <Text style={styles.sub}>RECOVERY{score != null ? '  %' : ''}</Text>
+            <Text style={[styles.score, { color: bandColor }]}>{score != null ? Math.round(score) : '--'}</Text>
+            <Text style={[styles.sub, score != null ? { color: bandColor, fontWeight: '700' } : null]}>
+              {score != null ? recoveryLabel(score).toUpperCase() : 'RECOVERY'}
+            </Text>
           </>
         )}
       </View>
